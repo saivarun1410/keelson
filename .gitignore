@@ -4,5 +4,6 @@ dist/
 .DS_Store
 .claude/settings.local.json
 
-# Demo recording output — regenerate with `cd demo && vhs hero.tape`
-docs/*.gif
+# Note: docs/*.gif is deliberately NOT ignored — GitHub can only render the
+# README hero image if the GIF is committed. Regenerate with:
+#   cd demo && vhs hero.tape
