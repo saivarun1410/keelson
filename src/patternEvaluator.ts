@@ -42,8 +42,10 @@ parentPort.on("message", (message) => {
     return;
   }
 
+  const wanted = new Set(message.patterns);
   const matches = new Map();
   for (const { source, expression } of compiled) {
+    if (!wanted.has(source)) continue;
     const hits = [];
     for (let index = 0; index < message.lines.length; index += 1) {
       if (expression.test(message.lines[index])) hits.push(index + 1);
@@ -112,22 +114,29 @@ function awaitMessage<T>(worker: Worker, path: string, milliseconds: number): Pr
   });
 }
 
+/**
+ * `selectPatterns` decides which patterns apply to each file, so a pattern is
+ * never executed against a file its own rule does not cover.
+ */
 export async function evaluatePatterns(
-  patterns: readonly string[],
   files: readonly FileEntry[],
+  selectPatterns: (path: string) => readonly string[],
   milliseconds: number,
 ): Promise<MatchIndex> {
   const index: MatchIndex = new Map();
-  if (patterns.length === 0 || files.length === 0) return index;
+  const perFile = files.map((file) => ({ file, patterns: selectPatterns(file.path) }));
+  const union = [...new Set(perFile.flatMap((entry) => entry.patterns))];
+  if (union.length === 0) return index;
 
   const worker = new Worker(WORKER_SOURCE, { eval: true });
 
   try {
-    worker.postMessage({ type: "patterns", patterns: [...patterns] });
+    worker.postMessage({ type: "patterns", patterns: union });
     await awaitMessage(worker, "config", milliseconds);
 
-    for (const file of files) {
-      worker.postMessage({ type: "file", lines: file.content.split("\n") });
+    for (const { file, patterns } of perFile) {
+      if (patterns.length === 0) continue;
+      worker.postMessage({ type: "file", lines: file.content.split("\n"), patterns: [...patterns] });
       const reply = await awaitMessage<{ matches: FileMatches }>(worker, file.path, milliseconds);
       if (reply.matches.size > 0) index.set(file.path, reply.matches);
     }

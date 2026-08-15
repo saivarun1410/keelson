@@ -5,8 +5,8 @@ import { evaluatePatterns, PatternTimeoutError } from "../src/patternEvaluator.t
 describe("patternEvaluator", () => {
   it("returns matches with 1-indexed line numbers", async () => {
     const matches = await evaluatePatterns(
-      ["System\\.out"],
       [{ path: "A.java", content: "class A {\n  System.out.println(1);\n}" }],
+      () => ["System\\.out"],
       1000,
     );
     assert.deepEqual(matches.get("A.java")?.get("System\\.out"), [2]);
@@ -18,7 +18,7 @@ describe("patternEvaluator", () => {
     const started = Date.now();
     await assert.rejects(
       () =>
-        evaluatePatterns(["^(a|aa)+$"], [{ path: "x.ts", content: `${"a".repeat(60)}!` }], 250),
+        evaluatePatterns([{ path: "x.ts", content: `${"a".repeat(60)}!` }], () => ["^(a|aa)+$"], 250),
       PatternTimeoutError,
     );
     assert.ok(Date.now() - started < 3000, "should abandon near the deadline");
@@ -29,12 +29,12 @@ describe("patternEvaluator", () => {
       path: `f${index}.ts`,
       content: index % 2 === 0 ? "BAD" : "fine",
     }));
-    const matches = await evaluatePatterns(["BAD"], files, 1000);
+    const matches = await evaluatePatterns(files, () => ["BAD"], 1000);
     assert.deepEqual([...matches.keys()], ["f0.ts", "f2.ts", "f4.ts"]);
   });
 
   it("is a no-op when there is nothing to evaluate", async () => {
-    assert.equal((await evaluatePatterns([], [{ path: "a", content: "x" }], 50)).size, 0);
-    assert.equal((await evaluatePatterns(["x"], [], 50)).size, 0);
+    assert.equal((await evaluatePatterns([{ path: "a", content: "x" }], () => [], 50)).size, 0);
+    assert.equal((await evaluatePatterns([], () => ["x"], 50)).size, 0);
   });
 });

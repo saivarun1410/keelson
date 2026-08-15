@@ -38,7 +38,7 @@ export const layerBoundariesRule: Rule<LayerBoundariesConfig> = {
     for (const file of ctx.files) {
       if (!matchesAny(file.path, config.from)) continue;
 
-      for (const ref of extractImports(file.content)) {
+      for (const ref of extractImports(file.content, file.path)) {
         const resolved = resolveSpecifier(ref, file.path);
         const breached = config.disallow.find(
           (glob) => matchesGlob(resolved, glob) || matchesGlob(ref.specifier, glob),

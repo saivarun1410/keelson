@@ -68,18 +68,27 @@ function parseSymbol(entry: unknown, index: number): BannedSymbol {
   }
 }
 
-/**
- * Every regex a config will execute, read straight off the raw rules.
- *
- * Both commands need this before rules run, to hand the patterns to the
- * evaluator rather than letting any of them reach the main thread.
- */
-export function bannedPatternSources(config: { rules: RawRule[] }): string[] {
-  return config.rules
-    .filter((rule) => rule.id === bannedSymbolsRule.id && Array.isArray(rule.symbols))
-    .flatMap((rule) => rule.symbols as { pattern?: unknown }[])
+function sourcesOf(rule: RawRule): string[] {
+  return (Array.isArray(rule.symbols) ? (rule.symbols as { pattern?: unknown }[]) : [])
     .map((symbol) => symbol?.pattern)
     .filter((pattern): pattern is string => typeof pattern === "string");
+}
+
+/**
+ * Builds the map from a file path to the patterns that apply to it.
+ *
+ * Scoping has to happen before evaluation, not after: running every pattern
+ * against every file made an out-of-scope pathological regex time out on a file
+ * its own rule never covered. Both commands share this selector so they cannot
+ * disagree about which patterns a file is subject to.
+ */
+export function patternSelector(config: { rules: RawRule[] }): (path: string) => string[] {
+  const groups = config.rules
+    .filter((rule) => rule.id === bannedSymbolsRule.id && Array.isArray(rule.files))
+    .map((rule) => ({ files: rule.files as string[], patterns: sourcesOf(rule) }));
+
+  return (path) =>
+    groups.filter((group) => matchesAny(path, group.files)).flatMap((group) => group.patterns);
 }
 
 /** Flags forbidden constructs: console.log, System.out, field @Autowired, TODO markers. */

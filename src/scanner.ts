@@ -9,7 +9,21 @@
  * pass per line and still needs no parser.
  */
 
+import {
+  consumeString,
+  openingTripleQuote,
+  skipRegexLiteral,
+} from "./scanTokens.ts";
+
 export interface ScanState {
+  /**
+   * Whether `#` starts a comment in this file's language.
+   *
+   * It cannot be decided from the character alone: `#` opens a comment in
+   * Python, Ruby and shell, but declares a private field in TypeScript, where
+   * treating `#repo = require("x")` as a comment would hide a real dependency.
+   */
+  hashComments: boolean;
   inBlockComment: boolean;
   inTemplate: boolean;
   /** The delimiter of an open triple-quoted string, or null. */
@@ -18,55 +32,30 @@ export interface ScanState {
   interpolationDepth: number;
 }
 
-export function createScanState(): ScanState {
-  return { inBlockComment: false, inTemplate: false, tripleQuote: null, interpolationDepth: 0 };
+const HASH_COMMENT_FILES = /\.(py|pyi|rb|sh|bash|zsh|ya?ml|toml|pl|r|tf|conf)$/i;
+
+export function createScanState(path = ""): ScanState {
+  return {
+    hashComments: HASH_COMMENT_FILES.test(path),
+    inBlockComment: false,
+    inTemplate: false,
+    tripleQuote: null,
+    interpolationDepth: 0,
+  };
 }
 
-const TRIPLE_QUOTES = ['"""', "'''"];
-
-/** Positions where a `/` begins a regex literal rather than a division. */
+/** Characters after which a `/` begins a regex literal rather than a division. */
 const OPERAND_POSITION = /[(,=:[!&|?{};+\-*%~^<>]/;
 
-function consumeString(line: string, start: number, quote: string): [string, number] {
-  let text = quote;
-  let index = start + 1;
-
-  while (index < line.length) {
-    if (line[index] === "\\") {
-      text += line.slice(index, index + 2);
-      index += 2;
-      continue;
-    }
-    text += line[index];
-    index += 1;
-    if (line[index - 1] === quote) break;
-  }
-
-  return [text, index];
-}
-
-/** Skips a regex literal, including its character classes and flags. */
-function skipRegexLiteral(line: string, start: number): number {
-  let index = start + 1;
-  let inClass = false;
-
-  while (index < line.length) {
-    const char = line[index];
-    if (char === "\\") {
-      index += 2;
-      continue;
-    }
-    if (char === "[") inClass = true;
-    else if (char === "]") inClass = false;
-    else if (char === "/" && !inClass) return index + 1;
-    index += 1;
-  }
-  return index;
-}
-
-function openingTripleQuote(line: string, index: number): string | null {
-  return TRIPLE_QUOTES.find((quote) => line.startsWith(quote, index)) ?? null;
-}
+/**
+ * Keywords after which a `/` also begins a regex literal. Looking only at the
+ * previous character misses these, so `return /require("x")/` was read as a
+ * division and its contents extracted as a dependency.
+ */
+const OPERAND_KEYWORDS = new Set([
+  "return", "typeof", "case", "in", "of", "delete", "void",
+  "throw", "new", "do", "else", "yield", "await",
+]);
 
 /**
  * Returns the code portion of `line`, advancing `state`.
@@ -80,6 +69,8 @@ export function codeOf(line: string, state: ScanState): string {
   let out = "";
   let index = 0;
   let lastCode: string | undefined;
+  let word = "";
+  let previousWord = "";
 
   while (index < line.length) {
     if (state.inBlockComment) {
@@ -127,10 +118,7 @@ export function codeOf(line: string, state: ScanState): string {
       index += 2;
       continue;
     }
-    // `#` comments Python, Ruby and shell. Requiring whitespace or line start
-    // before it keeps TypeScript private fields (`this.#count`) intact.
-    if (char === "#" && lastCode === undefined) return out;
-    if (char === "#" && /\s/.test(line[index - 1] ?? "")) return out;
+    if (char === "#" && state.hashComments) return out;
 
     const triple = openingTripleQuote(line, index);
     if (triple) {
@@ -156,7 +144,12 @@ export function codeOf(line: string, state: ScanState): string {
       continue;
     }
 
-    if (char === "/" && (lastCode === undefined || OPERAND_POSITION.test(lastCode))) {
+    // The keyword may sit immediately before the slash (`return/x/`) or be
+    // separated from it by whitespace (`return /x/`), so check both.
+    const precedingWord = word !== "" ? word : previousWord;
+    const afterOperand =
+      lastCode === undefined || OPERAND_POSITION.test(lastCode) || OPERAND_KEYWORDS.has(precedingWord);
+    if (char === "/" && afterOperand) {
       index = skipRegexLiteral(line, index);
       out += " ";
       continue;
@@ -174,6 +167,12 @@ export function codeOf(line: string, state: ScanState): string {
 
     out += char;
     if (!/\s/.test(char)) lastCode = char;
+    if (/[A-Za-z_$]/.test(char)) {
+      word += char;
+    } else if (word !== "") {
+      previousWord = word;
+      word = "";
+    }
     index += 1;
   }
 
