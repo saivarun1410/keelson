@@ -3,12 +3,20 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { RULE_IDS, RULES } from "./rules/index.ts";
-import { ConfigError, type KeelsonConfig, type RawRule } from "./types.ts";
+import {
+  ConfigError,
+  type KeelsonConfig,
+  type RawRule,
+  type TimeoutPolicy,
+} from "./types.ts";
 import { requireGlobList } from "./validate.ts";
 
 export const CONFIG_FILENAME = "keelson.yaml";
 
 const SUPPORTED_VERSION = 1;
+
+const TIMEOUT_POLICIES: readonly TimeoutPolicy[] = ["fail", "warn"];
+const DEFAULT_TIMEOUT_POLICY: TimeoutPolicy = "fail";
 
 const DEFAULT_EXCLUDES: readonly string[] = [
   "**/node_modules/**",
@@ -87,7 +95,7 @@ export function parseConfig(source: string): KeelsonConfig {
     throw new ConfigError(`${CONFIG_FILENAME} must contain a YAML mapping`);
   }
 
-  const { version, rules, exclude } = document as Record<string, unknown>;
+  const { version, rules, exclude, onPatternTimeout } = document as Record<string, unknown>;
 
   if (version !== SUPPORTED_VERSION) {
     throw new ConfigError(`${CONFIG_FILENAME} must declare \`version: ${SUPPORTED_VERSION}\``);
@@ -103,9 +111,21 @@ export function parseConfig(source: string): KeelsonConfig {
 
   return {
     version,
+    onPatternTimeout: parseTimeoutPolicy(onPatternTimeout),
     rules: rules.map(validateRule),
     exclude: [...DEFAULT_EXCLUDES, ...extraExcludes],
   };
+}
+
+function parseTimeoutPolicy(value: unknown): TimeoutPolicy {
+  if (value === undefined) return DEFAULT_TIMEOUT_POLICY;
+  if (typeof value !== "string" || !TIMEOUT_POLICIES.includes(value as TimeoutPolicy)) {
+    throw new ConfigError(
+      `\`onPatternTimeout\` must be one of ${TIMEOUT_POLICIES.join(", ")}, ` +
+        `got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as TimeoutPolicy;
 }
 
 export interface LoadedConfig {

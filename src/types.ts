@@ -56,8 +56,20 @@ export interface Rule<C = unknown> {
   check(config: C, ctx: RuleContext): Violation[];
 }
 
+/**
+ * What `check` does when a pattern has to be abandoned.
+ *
+ * The hook always allows the edit — it must never block work for a problem in
+ * the config. What CI should do is a real trade-off, so it is the repo's call:
+ * `fail` refuses to report a clean run it could not fully perform, `warn`
+ * matches the hook exactly at the cost of a rule that can stop being enforced
+ * without failing anything.
+ */
+export type TimeoutPolicy = "fail" | "warn";
+
 export interface KeelsonConfig {
   version: number;
+  onPatternTimeout: TimeoutPolicy;
   rules: RawRule[];
   /** Globs excluded from every rule. */
   exclude: string[];
