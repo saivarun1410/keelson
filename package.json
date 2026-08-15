@@ -1,0 +1,41 @@
+{
+  "name": "keelson",
+  "version": "0.1.0",
+  "description": "Enforce your repo's architecture rules at AI-agent edit time and in CI, from one rule file, in any language.",
+  "keywords": [
+    "claude-code",
+    "architecture",
+    "linter",
+    "hooks",
+    "ai-agents",
+    "code-standards",
+    "guardrails"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "keelson": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node build.mjs && chmod +x dist/cli.js",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "check": "node --experimental-strip-types src/cli.ts check",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

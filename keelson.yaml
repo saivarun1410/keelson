@@ -1,0 +1,32 @@
+# keelson's own rules — it enforces these on itself in CI and at edit time.
+version: 1
+
+rules:
+  - id: max-file-lines
+    files: ["src/**/*.ts", "test/**/*.ts"]
+    max: 200
+
+  - id: banned-symbols
+    files: ["src/**/*.ts"]
+    symbols:
+      - pattern: "console\\.(log|error)\\("
+        message: "Write to process.stdout/stderr explicitly; keelson has no logger."
+      - pattern: "\\bany\\b\\s*[;)=,]"
+        message: "Use `unknown` and narrow, not `any`."
+
+  # Rules describe violations; they must not reach into config loading or IO.
+  - id: layer-boundaries
+    from: "src/rules/**"
+    disallow: ["src/config.ts", "src/commands/**", "node:fs", "node:fs/promises"]
+    message: "Rules must be pure functions over RuleContext — no IO, no config loading."
+
+  # Commands own IO and process exit; the engine must stay independent of them.
+  - id: layer-boundaries
+    from: "src/engine.ts"
+    disallow: ["src/commands/**", "src/report.ts"]
+    message: "The engine must not depend on commands or presentation."
+
+  - id: required-companion
+    files: ["src/rules/*.ts"]
+    companion: "test/rules.test.ts"
+    message: "Every rule must be covered by test/rules.test.ts."
