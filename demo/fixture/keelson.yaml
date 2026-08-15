@@ -1,0 +1,18 @@
+# Rules for the demo fixture — a conventional layered Spring-style service.
+version: 1
+
+rules:
+  - id: layer-boundaries
+    from: "src/**/controller/**"
+    disallow: ["src/**/repository/**", "**.repository.**"]
+    message: "Controllers must go through a service, never a repository directly."
+
+  - id: banned-symbols
+    files: ["src/**/*.java"]
+    symbols:
+      - pattern: "System\\.out\\.print"
+        message: "Use SLF4J, not System.out."
+
+  - id: max-file-lines
+    files: ["src/**/*.java"]
+    max: 60

@@ -3,3 +3,6 @@ dist/
 *.log
 .DS_Store
 .claude/settings.local.json
+
+# Demo recording output — regenerate with `cd demo && vhs hero.tape`
+docs/*.gif

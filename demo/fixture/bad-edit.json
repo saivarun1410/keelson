@@ -1,0 +1,8 @@
+{
+  "tool_name": "Write",
+  "cwd": "/Users/saivarunthupakula/Documents/VarunSpace/keelson/demo/fixture",
+  "tool_input": {
+    "file_path": "/Users/saivarunthupakula/Documents/VarunSpace/keelson/demo/fixture/src/main/java/com/acme/controller/UserController.java",
+    "content": "package com.acme.controller;\n\nimport com.acme.repository.UserRepository;\nimport com.acme.service.UserService;\nimport org.springframework.web.bind.annotation.GetMapping;\nimport org.springframework.web.bind.annotation.PathVariable;\nimport org.springframework.web.bind.annotation.RestController;\n\n@RestController\npublic class UserController {\n\n    private final UserService userService;\n\n    public UserController(UserService userService) {\n        this.userService = userService;\n    }\n\n    @GetMapping(\"/users/{id}\")\n    public UserResponse getUser(@PathVariable String id) {\n        return userService.findById(id);\n    }\n}\n"
+  }
+}
