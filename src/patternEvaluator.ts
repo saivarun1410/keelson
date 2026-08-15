@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { WORKER_SOURCE } from "./patternWorkerSource.ts";
 import type { FileEntry, FileMatches, MatchIndex } from "./types.ts";
 
 /**
@@ -16,45 +17,6 @@ import type { FileEntry, FileMatches, MatchIndex } from "./types.ts";
  * One worker is reused across files and results come back as matches, so no
  * pattern is ever executed twice.
  */
-
-const WORKER_SOURCE = `
-const { parentPort } = require("node:worker_threads");
-let compiled = [];
-
-// V8 interprets a regex before tiering it up to compiled code, and the
-// interpreted path is several times slower. Without this warm-up, whether a
-// pattern beats the deadline depends on how many files happened to be scanned
-// first — so 'check' (many files) and 'hook' (one) could disagree on identical
-// content. A few throwaway executions make the timing depend on the pattern,
-// not on call order.
-const warmUp = (expression) => {
-  for (let round = 0; round < 16; round += 1) expression.test("warmup");
-};
-
-parentPort.on("message", (message) => {
-  if (message.type === "patterns") {
-    compiled = message.patterns.map((source) => {
-      const expression = new RegExp(source);
-      warmUp(expression);
-      return { source, expression };
-    });
-    parentPort.postMessage({ type: "ready" });
-    return;
-  }
-
-  const wanted = new Set(message.patterns);
-  const matches = new Map();
-  for (const { source, expression } of compiled) {
-    if (!wanted.has(source)) continue;
-    const hits = [];
-    for (let index = 0; index < message.lines.length; index += 1) {
-      if (expression.test(message.lines[index])) hits.push(index + 1);
-    }
-    if (hits.length > 0) matches.set(source, hits);
-  }
-  parentPort.postMessage({ type: "matches", matches });
-});
-`;
 
 /**
  * Per-file budget, shared by both commands.
@@ -130,11 +92,24 @@ export interface EvaluationResult {
   timeouts: PatternTimeout[];
 }
 
+/**
+ * Starts a worker with the patterns compiled and warmed.
+ *
+ * If startup itself exceeds the deadline the worker must be terminated before
+ * rethrowing: a live worker keeps its message listener registered, which keeps
+ * the event loop alive and hangs the process — the exact failure this whole
+ * mechanism exists to prevent.
+ */
 async function startWorker(union: string[], milliseconds: number): Promise<Worker> {
   const worker = new Worker(WORKER_SOURCE, { eval: true });
-  worker.postMessage({ type: "patterns", patterns: union });
-  await awaitMessage(worker, "config", milliseconds);
-  return worker;
+  try {
+    worker.postMessage({ type: "patterns", patterns: union });
+    await awaitMessage(worker, "config", milliseconds);
+    return worker;
+  } catch (error) {
+    await worker.terminate();
+    throw error;
+  }
 }
 
 /**
@@ -173,22 +148,30 @@ export async function evaluatePatterns(
   try {
     for (const { file, patterns } of perFile) {
       if (patterns.length === 0) continue;
-      try {
-        worker.postMessage({
-          type: "file",
-          lines: file.content.split("\n"),
-          patterns: [...patterns],
-        });
-        const reply = await awaitMessage<{ matches: FileMatches }>(worker, file.path, milliseconds);
-        if (reply.matches.size > 0) matches.set(file.path, reply.matches);
-      } catch (error) {
-        if (!(error instanceof PatternTimeoutError)) throw error;
-        timeouts.push({ path: file.path, patterns: [...patterns] });
-        // The worker is still grinding on the abandoned match; replace it so
-        // the remaining files are still evaluated.
-        await worker.terminate();
-        worker = await startWorker(union, milliseconds);
+      const lines = file.content.split("\n");
+      const fileMatches: FileMatches = new Map();
+      const abandoned: string[] = [];
+
+      // One message per pattern. Batching them meant a single pathological
+      // pattern discarded the results of every fast pattern beside it, so a
+      // real violation went unreported because an unrelated regex was slow.
+      for (const pattern of patterns) {
+        try {
+          worker.postMessage({ type: "file", lines, pattern });
+          const reply = await awaitMessage<{ hits: number[] }>(worker, file.path, milliseconds);
+          if (reply.hits.length > 0) fileMatches.set(pattern, reply.hits);
+        } catch (error) {
+          if (!(error instanceof PatternTimeoutError)) throw error;
+          abandoned.push(pattern);
+          // The worker is still grinding on the abandoned match; replace it so
+          // the remaining patterns and files are still evaluated.
+          await worker.terminate();
+          worker = await startWorker(union, milliseconds);
+        }
       }
+
+      if (fileMatches.size > 0) matches.set(file.path, fileMatches);
+      if (abandoned.length > 0) timeouts.push({ path: file.path, patterns: abandoned });
     }
   } finally {
     await worker.terminate();

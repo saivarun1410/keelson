@@ -37,11 +37,6 @@ export function codeOf(line: string, state: ScanState): string {
   let lastCode: string | undefined;
   let word = "";
   let previousWord = "";
-  let parenDepth = 0;
-  const controlParens: number[] = [];
-  // Set by the `)` that closes a control condition: what follows is a
-  // statement, so `if (on) /re/.test(x)` is a regex literal, not a division.
-  let afterControlParen = false;
 
   while (index < line.length) {
     if (state.inBlockComment) {
@@ -122,11 +117,11 @@ export function codeOf(line: string, state: ScanState): string {
       lastCode === undefined ||
       OPERAND_POSITION.test(lastCode) ||
       OPERAND_KEYWORDS.has(precedingWord) ||
-      afterControlParen;
+      state.afterControlParen;
     if (char === "/" && afterOperand) {
       index = skipRegexLiteral(line, index);
       out += " ";
-      afterControlParen = false;
+      state.afterControlParen = false;
       continue;
     }
 
@@ -145,14 +140,14 @@ export function codeOf(line: string, state: ScanState): string {
     }
 
     if (char === "(") {
-      parenDepth += 1;
-      if (CONTROL_KEYWORDS.has(precedingWord)) controlParens.push(parenDepth);
+      state.parenDepth += 1;
+      if (CONTROL_KEYWORDS.has(precedingWord)) state.controlParens.push(state.parenDepth);
     } else if (char === ")") {
-      if (controlParens.at(-1) === parenDepth) {
-        controlParens.pop();
-        afterControlParen = true;
+      if (state.controlParens.at(-1) === state.parenDepth) {
+        state.controlParens.pop();
+        state.afterControlParen = true;
       }
-      parenDepth -= 1;
+      state.parenDepth -= 1;
     }
 
     if (state.interpolationDepth > 0) {
@@ -167,7 +162,7 @@ export function codeOf(line: string, state: ScanState): string {
 
     out += char;
     if (!/\s/.test(char)) {
-      if (char !== ")") afterControlParen = false;
+      if (char !== ")") state.afterControlParen = false;
       lastCode = char;
     }
     if (/[A-Za-z_$]/.test(char)) {

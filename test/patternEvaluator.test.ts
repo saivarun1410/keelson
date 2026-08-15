@@ -40,3 +40,27 @@ describe("patternEvaluator", () => {
     assert.equal((await evaluatePatterns([], () => ["x"], 50)).matches.size, 0);
   });
 });
+
+describe("patternEvaluator resilience", () => {
+  it("keeps matches from fast patterns when another times out", async () => {
+    const { matches, timeouts } = await evaluatePatterns(
+      [{ path: "x.ts", content: `${"a".repeat(60)}!` }],
+      () => ["^(a|aa)+$", "!$"],
+      2000,
+    );
+    // Batching every pattern into one job meant one slow regex discarded the
+    // results of every fast one beside it, hiding a real violation.
+    assert.deepEqual(matches.get("x.ts")?.get("!$"), [1]);
+    assert.deepEqual(timeouts, [{ path: "x.ts", patterns: ["^(a|aa)+$"] }]);
+  });
+
+  it("does not leave a worker alive when startup times out", async () => {
+    // A leaked worker keeps its listener registered, which keeps the event loop
+    // alive and hangs the process — the failure the guard exists to prevent.
+    const before = process.getActiveResourcesInfo().filter((r) => r === "Worker").length;
+    const { timeouts } = await evaluatePatterns([{ path: "x.ts", content: "x" }], () => ["x"], 1);
+    assert.equal(timeouts.length, 1);
+    const after = process.getActiveResourcesInfo().filter((r) => r === "Worker").length;
+    assert.equal(after, before, "no worker should still be running");
+  });
+});

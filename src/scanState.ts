@@ -21,6 +21,16 @@ export interface ScanState {
   tripleQuote: string | null;
   /** Nesting depth inside `${ ... }`; 0 means plain template text. */
   interpolationDepth: number;
+  /**
+   * Parenthesis bookkeeping, held here rather than per line because a control
+   * condition may wrap: `if (\n  enabled\n) /re/.test(x)` still has to know
+   * that the `)` on the last line closes an `if`.
+   */
+  parenDepth: number;
+  /** Paren depths at which a control condition opened. */
+  controlParens: number[];
+  /** Set by the `)` closing a control condition: what follows is a statement. */
+  afterControlParen: boolean;
 }
 
 export const HASH_COMMENT_FILES = /\.(py|pyi|rb|sh|bash|zsh|ya?ml|toml|pl|r|tf|conf)$/i;
@@ -33,6 +43,9 @@ export function createScanState(path = ""): ScanState {
     inTemplate: false,
     tripleQuote: null,
     interpolationDepth: 0,
+    parenDepth: 0,
+    controlParens: [],
+    afterControlParen: false,
   };
 }
 
