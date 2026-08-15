@@ -36,20 +36,25 @@ export async function checkCommand(argv: readonly string[]): Promise<number> {
     root,
   });
 
-  process.stdout.write(`${formatReport(violations)}\n`);
-
-  // Violations are identical to what the hook computed for the same content;
-  // the timeout is reported separately, as the configuration error it is. CI
-  // still fails on it, because a pattern that silently stops being enforced is
-  // worse than one that fails loudly.
-  for (const timeout of timeouts) {
-    process.stderr.write(
-      `keelson: skipped ${timeout.patterns.length} banned-symbols pattern(s) for ` +
-        `${timeout.path} after ${PATTERN_DEADLINE_MS}ms. Rewrite the pattern that ` +
-        `backtracks catastrophically.\n`,
-    );
+  // Violations are identical to what the hook computes for the same content.
+  // A timeout is reported apart from them, because it is a configuration error
+  // rather than a finding about the code.
+  if (timeouts.length === 0) {
+    process.stdout.write(`${formatReport(violations)}\n`);
+    return hasErrors(violations) ? 1 : 0;
   }
 
-  if (timeouts.length > 0) return 2;
-  return hasErrors(violations) ? 1 : 0;
+  if (violations.length > 0) process.stdout.write(`${formatReport(violations)}\n`);
+
+  const skipped = timeouts.reduce((total, entry) => total + entry.patterns.length, 0);
+  process.stderr.write(
+    `keelson: enforcement incomplete — ${skipped} banned-symbols pattern(s) across ` +
+      `${timeouts.length} file(s) exceeded ${PATTERN_DEADLINE_MS}ms and were skipped:\n` +
+      timeouts
+        .map((entry) => `  ${entry.path}: ${entry.patterns.join(", ")}\n`)
+        .join("") +
+      `Rewrite the pattern that backtracks catastrophically. CI fails here rather ` +
+      `than reporting a clean run that did not actually check everything.\n`,
+  );
+  return 2;
 }

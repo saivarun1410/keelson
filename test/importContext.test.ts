@@ -94,3 +94,20 @@ describe("statement position and JSX", () => {
     );
   });
 });
+
+describe("multiline statement position", () => {
+  it("recognises a regex after a control condition that wraps lines", () => {
+    assert.deepEqual(
+      extractImports('if (\n  enabled\n) /require("src/config.ts")/.test(text);', "src/rules/a.ts"),
+      [],
+    );
+  });
+
+  it("still treats a wrapped parenthesised expression as division", () => {
+    const [ref] = extractImports(
+      'const x = (a +\n  b) / 2;\nimport { R } from "../repo/r.ts";',
+      "src/a.ts",
+    );
+    assert.equal(ref?.specifier, "../repo/r.ts");
+  });
+});
