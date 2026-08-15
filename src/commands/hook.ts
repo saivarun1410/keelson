@@ -3,7 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { loadConfig } from "../config.ts";
 import { hasErrors, runRules, toPosix } from "../engine.ts";
 import { matchesAny } from "../glob.ts";
-import { evaluatePatterns, PATTERN_DEADLINE_MS, PatternTimeoutError } from "../patternEvaluator.ts";
+import { evaluatePatterns, PATTERN_DEADLINE_MS } from "../patternEvaluator.ts";
 import { formatDenial } from "../report.ts";
 import { patternSelector } from "../rules/bannedSymbols.ts";
 import type { FileEntry, KeelsonConfig } from "../types.ts";
@@ -24,21 +24,24 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/** Surfaces a problem to the user without touching the permission decision. */
-function warn(message: string): void {
-  process.stdout.write(`${JSON.stringify({ systemMessage: message })}\n`);
-}
-
-function deny(reason: string): void {
-  process.stdout.write(
-    `${JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: reason,
-      },
-    })}\n`,
-  );
+/**
+ * Writes the hook's single reply.
+ *
+ * Exactly one JSON object may be emitted: a warning and a decision printed as
+ * separate objects are not parseable by the consumer, so they are combined.
+ */
+function respond(options: { warning?: string; denyReason?: string }): void {
+  const payload: Record<string, unknown> = {};
+  if (options.warning) payload.systemMessage = options.warning;
+  if (options.denyReason) {
+    payload.hookSpecificOutput = {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: options.denyReason,
+    };
+  }
+  if (Object.keys(payload).length === 0) return;
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
 /**
@@ -116,17 +119,20 @@ export async function hookCommand(): Promise<number> {
 
   // Patterns are evaluated off the main thread under a deadline. A timeout
   // throws, and the hook's fail-open handler turns that into no decision.
-  // A timeout means the config holds a pathological pattern. That must never
-  // block the edit, but it must not be silent either, or enforcement quietly
-  // stops at edit time and resurfaces much later as a CI failure.
-  let matches;
-  try {
-    matches = await evaluatePatterns([file], patternSelector(config), PATTERN_DEADLINE_MS);
-  } catch (error) {
-    if (!(error instanceof PatternTimeoutError)) throw error;
-    warn(`keelson skipped banned-symbols for this edit. ${error.message}`);
-    return 0;
-  }
+  const { matches, timeouts } = await evaluatePatterns(
+    [file],
+    patternSelector(config),
+    PATTERN_DEADLINE_MS,
+  );
+
+  // A timeout is a config bug, not a verdict about this edit. Only the pattern
+  // that hung is skipped — every other rule still runs, and the user is told.
+  const warning =
+    timeouts.length > 0
+      ? `keelson skipped ${timeouts[0].patterns.length} banned-symbols pattern(s) for ` +
+        `${timeouts[0].path}: evaluation exceeded ${PATTERN_DEADLINE_MS}ms. ` +
+        `One of them backtracks catastrophically and should be rewritten.`
+      : undefined;
 
   const violations = runRules(config, {
     files: [file],
@@ -135,8 +141,7 @@ export async function hookCommand(): Promise<number> {
     matches,
     root,
   });
-  if (!hasErrors(violations)) return 0;
-
-  deny(formatDenial(violations.filter((violation) => violation.severity === "error")));
+  const errors = violations.filter((violation) => violation.severity === "error");
+  respond({ warning, denyReason: errors.length > 0 ? formatDenial(errors) : undefined });
   return 0;
 }

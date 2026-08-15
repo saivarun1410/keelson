@@ -12,7 +12,8 @@
  */
 
 import { GoImportBlock, insideStringLiteral } from "./lineContext.ts";
-import { codeOf, createScanState } from "./scanner.ts";
+import { codeOf } from "./scanner.ts";
+import { createScanState } from "./scanState.ts";
 
 /** Which language's notation the specifier is written in; drives resolution. */
 export type ImportSyntax = "es" | "go" | "dotted" | "python-relative";
@@ -31,8 +32,8 @@ const ES_BARE = /^\s*import\s+["']([^"']+)["']/;
 // which is what keeps `export const route = "src/repository/users"` out.
 const ES_FROM = /^\s*(?:import|export)\b[^'"]*\bfrom\s*["']([^"']+)["']/;
 // `await import("x")` anywhere on the line.
-const ES_DYNAMIC = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/;
-const CJS_REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/;
+const ES_DYNAMIC = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+const CJS_REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
 // Go single-line with an alias: `import alias "example.com/project/repo"`.
 const GO_ALIASED = /^\s*import\s+(?:[\w.]+|_|\.)\s+["]([^"]+)["]/;
 // Java / Kotlin / Python, including `import a.b, c.d` and a trailing `as` alias.
@@ -80,16 +81,21 @@ function scanLine(line: string, inGoBlock: boolean): PartialRef[] {
     if (found) return [{ specifier: found.specifier, syntax: "es" }];
   }
 
-  // These can appear mid-line, so an occurrence quoted inside a string is not
-  // a dependency — `const doc = 'call require("x")'` must not match — and a
-  // member call such as `client.require("x")` is an unrelated method, not a
-  // module load. `module.require` is the one member form that really loads.
+  // These can appear mid-line and more than once, so every occurrence is
+  // collected in source order. An occurrence quoted inside a string is not a
+  // dependency — `const doc = 'call require("x")'` — and a member call such as
+  // `client.require("x")` is an unrelated method, not a module load.
+  // `module.require` is the one member form that really loads.
+  const calls: PartialRef[] = [];
   for (const pattern of [ES_DYNAMIC, CJS_REQUIRE]) {
-    const found = matchAt(line, pattern);
-    if (found && !insideStringLiteral(line, found.index) && !isMemberCall(line, found.index)) {
-      return [{ specifier: found.specifier, syntax: "es" }];
+    pattern.lastIndex = 0;
+    for (const match of line.matchAll(pattern)) {
+      const index = match.index ?? 0;
+      if (!match[1] || insideStringLiteral(line, index) || isMemberCall(line, index)) continue;
+      calls.push({ specifier: match[1], syntax: "es" });
     }
   }
+  if (calls.length > 0) return calls;
 
   const goAliased = matchAt(line, GO_ALIASED);
   if (goAliased) return [{ specifier: goAliased.specifier, syntax: "go" }];

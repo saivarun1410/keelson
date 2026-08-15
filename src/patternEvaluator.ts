@@ -118,31 +118,81 @@ function awaitMessage<T>(worker: Worker, path: string, milliseconds: number): Pr
  * `selectPatterns` decides which patterns apply to each file, so a pattern is
  * never executed against a file its own rule does not cover.
  */
+/** A file whose patterns could not be evaluated in time, and so were skipped. */
+export interface PatternTimeout {
+  path: string;
+  patterns: string[];
+}
+
+export interface EvaluationResult {
+  matches: MatchIndex;
+  /** Empty unless a pattern was abandoned. Diagnostics, not violations. */
+  timeouts: PatternTimeout[];
+}
+
+async function startWorker(union: string[], milliseconds: number): Promise<Worker> {
+  const worker = new Worker(WORKER_SOURCE, { eval: true });
+  worker.postMessage({ type: "patterns", patterns: union });
+  await awaitMessage(worker, "config", milliseconds);
+  return worker;
+}
+
+/**
+ * Evaluates each file's patterns and reports which ones had to be abandoned.
+ *
+ * A timeout is deliberately not an exception. Throwing meant one slow pattern
+ * suppressed every other rule for that edit, and left the two entry points
+ * reporting different violations for identical input. Skipping only the
+ * offending pattern keeps the violation set the same on both sides; what each
+ * command does about the diagnostic is its own decision.
+ */
 export async function evaluatePatterns(
   files: readonly FileEntry[],
   selectPatterns: (path: string) => readonly string[],
   milliseconds: number,
-): Promise<MatchIndex> {
-  const index: MatchIndex = new Map();
+): Promise<EvaluationResult> {
+  const matches: MatchIndex = new Map();
+  const timeouts: PatternTimeout[] = [];
   const perFile = files.map((file) => ({ file, patterns: selectPatterns(file.path) }));
   const union = [...new Set(perFile.flatMap((entry) => entry.patterns))];
-  if (union.length === 0) return index;
+  if (union.length === 0) return { matches, timeouts };
 
-  const worker = new Worker(WORKER_SOURCE, { eval: true });
+  let worker: Worker;
+  try {
+    worker = await startWorker(union, milliseconds);
+  } catch {
+    // Compiling the patterns itself failed or hung: nothing can be evaluated,
+    // and both commands must see the same thing.
+    const affected = perFile.filter((entry) => entry.patterns.length > 0);
+    return {
+      matches,
+      timeouts: affected.map((entry) => ({ path: entry.file.path, patterns: [...entry.patterns] })),
+    };
+  }
 
   try {
-    worker.postMessage({ type: "patterns", patterns: union });
-    await awaitMessage(worker, "config", milliseconds);
-
     for (const { file, patterns } of perFile) {
       if (patterns.length === 0) continue;
-      worker.postMessage({ type: "file", lines: file.content.split("\n"), patterns: [...patterns] });
-      const reply = await awaitMessage<{ matches: FileMatches }>(worker, file.path, milliseconds);
-      if (reply.matches.size > 0) index.set(file.path, reply.matches);
+      try {
+        worker.postMessage({
+          type: "file",
+          lines: file.content.split("\n"),
+          patterns: [...patterns],
+        });
+        const reply = await awaitMessage<{ matches: FileMatches }>(worker, file.path, milliseconds);
+        if (reply.matches.size > 0) matches.set(file.path, reply.matches);
+      } catch (error) {
+        if (!(error instanceof PatternTimeoutError)) throw error;
+        timeouts.push({ path: file.path, patterns: [...patterns] });
+        // The worker is still grinding on the abandoned match; replace it so
+        // the remaining files are still evaluated.
+        await worker.terminate();
+        worker = await startWorker(union, milliseconds);
+      }
     }
   } finally {
     await worker.terminate();
   }
 
-  return index;
+  return { matches, timeouts };
 }
