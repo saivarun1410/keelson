@@ -68,6 +68,20 @@ function parseSymbol(entry: unknown, index: number): BannedSymbol {
   }
 }
 
+/**
+ * Every regex a config will execute, read straight off the raw rules.
+ *
+ * Both commands need this before rules run, to hand the patterns to the
+ * evaluator rather than letting any of them reach the main thread.
+ */
+export function bannedPatternSources(config: { rules: RawRule[] }): string[] {
+  return config.rules
+    .filter((rule) => rule.id === bannedSymbolsRule.id && Array.isArray(rule.symbols))
+    .flatMap((rule) => rule.symbols as { pattern?: unknown }[])
+    .map((symbol) => symbol?.pattern)
+    .filter((pattern): pattern is string => typeof pattern === "string");
+}
+
 /** Flags forbidden constructs: console.log, System.out, field @Autowired, TODO markers. */
 export const bannedSymbolsRule: Rule<BannedSymbolsConfig> = {
   id: "banned-symbols",
@@ -84,21 +98,26 @@ export const bannedSymbolsRule: Rule<BannedSymbolsConfig> = {
     };
   },
 
+  /**
+   * Reads matches computed ahead of time rather than executing the patterns
+   * here. All regex execution happens in `patternEvaluator`, under a deadline
+   * and off the main thread, so a pathological pattern can never hang a caller.
+   */
   check(config, ctx): Violation[] {
     const violations: Violation[] = [];
 
     for (const file of ctx.files) {
       if (!matchesAny(file.path, config.files)) continue;
 
-      const lines = file.content.split("\n");
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index];
-        for (const symbol of config.symbols) {
-          if (!symbol.pattern.test(line)) continue;
+      const fileMatches = ctx.matches.get(file.path);
+      if (!fileMatches) continue;
+
+      for (const symbol of config.symbols) {
+        for (const line of fileMatches.get(symbol.source) ?? []) {
           violations.push({
             ruleId: bannedSymbolsRule.id,
             file: file.path,
-            line: index + 1,
+            line,
             severity: config.severity,
             message: symbol.message,
           });

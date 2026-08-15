@@ -67,6 +67,37 @@ describe("imports", () => {
     );
   });
 
+  it("ignores Python trailing comments, triple-quoted blocks and regex literals", () => {
+    assert.deepEqual(extractImports('do_thing()  # require("src/repository/users")'), []);
+    assert.deepEqual(extractImports('docs = """\nimport pkg.repository as repository\n"""'), []);
+    assert.deepEqual(extractImports('val docs = """\nimport com.acme.repository.Repo\n"""'), []);
+    assert.deepEqual(extractImports('const pattern = /require("src/repository/users")/;'), []);
+  });
+
+  it("keeps a TypeScript private field out of the # comment rule", () => {
+    const [ref] = extractImports('class A { #n = 0; }\nimport { R } from "../repo/r.ts";');
+    assert.equal(ref?.specifier, "../repo/r.ts");
+  });
+
+  it("treats division as division, not a regex literal", () => {
+    const [ref] = extractImports('const ratio = a / b;\nimport { R } from "../repo/r.ts";');
+    assert.equal(ref?.specifier, "../repo/r.ts");
+  });
+
+  it("extracts Python aliased imports with trailing comments and comma lists", () => {
+    const [aliased] = extractImports("import pkg.repository as repository  # boundary");
+    assert.equal(aliased?.specifier, "pkg.repository");
+    assert.deepEqual(
+      extractImports("import pkg.repository, pkg.service").map((ref) => ref.specifier),
+      ["pkg.repository", "pkg.service"],
+    );
+  });
+
+  it("extracts a dynamic import whose argument wraps", () => {
+    const [ref] = extractImports('const repo = import(\n  "../repository/users"\n);');
+    assert.equal(ref?.specifier, "../repository/users");
+  });
+
   it("keeps a specifier containing // inside a string", () => {
     const [ref] = extractImports('import x from "http://example.com/m.js";');
     assert.equal(ref?.specifier, "http://example.com/m.js");

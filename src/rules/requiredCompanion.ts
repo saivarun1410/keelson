@@ -61,7 +61,6 @@ export const requiredCompanionRule: Rule<RequiredCompanionConfig> = {
 
   check(config, ctx): Violation[] {
     const violations: Violation[] = [];
-    const known = new Set(ctx.allPaths);
 
     for (const file of ctx.files) {
       if (!matchesAny(file.path, config.files)) continue;
@@ -76,7 +75,7 @@ export const requiredCompanionRule: Rule<RequiredCompanionConfig> = {
       // otherwise be reported as missing while it is being created.
       if (expected === file.path) continue;
 
-      if (known.has(expected)) continue;
+      if (ctx.hasPath(expected)) continue;
 
       violations.push({
         ruleId: requiredCompanionRule.id,

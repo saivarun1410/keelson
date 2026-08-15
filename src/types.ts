@@ -18,11 +18,27 @@ export interface FileEntry {
   content: string;
 }
 
+/** Pattern source → the 1-indexed lines it matched in one file. */
+export type FileMatches = Map<string, number[]>;
+
+/** File path → its pattern matches. Produced once, under a deadline. */
+export type MatchIndex = Map<string, FileMatches>;
+
 export interface RuleContext {
   /** Files under evaluation this run. In hook mode this is a single proposed file. */
   files: FileEntry[];
-  /** Every tracked path in the repo. Used by rules that check for absent files. */
-  allPaths: string[];
+  /**
+   * Whether a repo-relative path exists in the post-edit tree.
+   *
+   * A predicate rather than a list: hook mode can answer it with one stat,
+   * where materialising every path in the repo cost an O(repo) walk per edit.
+   */
+  hasPath(path: string): boolean;
+  /**
+   * Regex matches computed ahead of time under a deadline, so no rule ever
+   * executes a user-supplied pattern on the main thread.
+   */
+  matches: MatchIndex;
   root: string;
 }
 

@@ -105,13 +105,16 @@ The existing architecture linters are good, and they all run *after* the code ex
 
 `layer-boundaries` matches import specifiers both as resolved repo paths and as raw strings, so one rule shape covers relative imports (`../repository/x`), package names (`lodash`), and fully-qualified names (`com.acme.data.Repo`). There is no AST parser and no per-language plugin — that's the point.
 
-Import extraction currently understands ES modules, CommonJS, Java/Kotlin, Python, and Go.
+Import extraction currently understands ES modules (including dynamic, multi-line and re-export forms), CommonJS, Java/Kotlin, Python and Go.
+
+A character-level scanner decides what counts as code first, so none of these are mistaken for dependencies: line and block comments, trailing comments, Python `#` comments, template literals, Python docstrings and Kotlin/Java text blocks, and regex literals. A specifier containing `://` survives all of it, and `${ ... }` inside a template is still read as code.
 
 ## Design guarantees
 
 - **Fails open, always.** A malformed payload, a missing config, an unreadable file, an edit it cannot reconstruct exactly, or a bug in keelson exits 0 with no decision. A tool that wedges your session when it breaks gets uninstalled. It will never block you for its own reasons — only for yours.
-- **A pathological regex cannot hang your session.** Regex execution is synchronous: once a catastrophically backtracking pattern starts on the main thread, nothing can interrupt it — not a `try`/`catch`, not a timer — so failing open would be impossible. Before any pattern runs in-process, keelson proves it terminates against the actual content in a worker under a hard deadline, and fails open if that deadline passes. Shape heuristics are not enough here: `^(a|aa)+$` is exponential with no nested quantifier anywhere in it.
-- **~34ms per hook invocation**, of which ~17ms is Node's own startup. That rises to ~46ms for files covered by a `banned-symbols` rule, which is the cost of the guarantee above; files no such rule matches skip it entirely. Likewise the repo scan `required-companion` needs is skipped unless a companion rule covers the file being edited.
+- **A pathological regex cannot hang your session.** Regex execution is synchronous: once a catastrophically backtracking pattern starts on the main thread, nothing can interrupt it — not a `try`/`catch`, not a timer — so failing open would be impossible. Every user pattern is therefore executed in a worker under a hard deadline, and no rule ever runs one itself. Shape heuristics are not enough here: `^(a|aa)+$` is exponential with no nested quantifier anywhere in it.
+- **A pattern that hits the deadline is a config bug, and each side says so in its own way**: the hook fails open, because it must never block your work; `check` fails the build with the offending file and pattern named, because silently skipping enforcement in CI is the wrong trade. Both use the same deadline, and patterns are warmed before timing so the verdict depends on the pattern rather than on how many files happened to be scanned first.
+- **~32ms per hook invocation**, of which ~17ms is Node's own startup. Answering `required-companion` costs one `stat`, not a directory walk, so latency does not grow with repository size.
 - **False positives are treated as the worst class of bug.** Blocking a legitimate edit stops your work and teaches you to uninstall the tool; missing a violation only leaves you where you started. Import detection is deliberately conservative for this reason — quoted strings, commented-out code, and Go strings outside an import block are not dependencies.
 - **Same engine both sides.** `check` and `hook` run identical rule code, so the hook can't disagree with CI.
 - **keelson enforces its own `keelson.yaml` on itself**, in CI and at edit time. See the repo root.

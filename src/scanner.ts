@@ -2,25 +2,31 @@
  * A character-level scanner that reduces each line to the part that is actually
  * code, carrying string and comment state across line boundaries.
  *
- * Recognising comments by line prefix alone was not enough: a trailing
- * `// require("x")` and a specifier sitting inside a multi-line template
- * literal were both extracted as real dependencies, and each one blocks a
- * legitimate edit. Tracking state properly costs a single pass per line and
- * still needs no parser.
+ * Every construct handled here was, at some point, mistaken for a dependency:
+ * a trailing comment, a specifier inside a template literal or a Python
+ * docstring, a path inside a regex literal. Each one blocks a legitimate edit,
+ * which is the worst failure this tool has. Tracking state properly costs one
+ * pass per line and still needs no parser.
  */
 
 export interface ScanState {
   inBlockComment: boolean;
   inTemplate: boolean;
+  /** The delimiter of an open triple-quoted string, or null. */
+  tripleQuote: string | null;
   /** Nesting depth inside `${ ... }`; 0 means plain template text. */
   interpolationDepth: number;
 }
 
 export function createScanState(): ScanState {
-  return { inBlockComment: false, inTemplate: false, interpolationDepth: 0 };
+  return { inBlockComment: false, inTemplate: false, tripleQuote: null, interpolationDepth: 0 };
 }
 
-/** Consumes a quoted string, preserving it — specifiers live inside these. */
+const TRIPLE_QUOTES = ['"""', "'''"];
+
+/** Positions where a `/` begins a regex literal rather than a division. */
+const OPERAND_POSITION = /[(,=:[!&|?{};+\-*%~^<>]/;
+
 function consumeString(line: string, start: number, quote: string): [string, number] {
   let text = quote;
   let index = start + 1;
@@ -39,20 +45,41 @@ function consumeString(line: string, start: number, quote: string): [string, num
   return [text, index];
 }
 
+/** Skips a regex literal, including its character classes and flags. */
+function skipRegexLiteral(line: string, start: number): number {
+  let index = start + 1;
+  let inClass = false;
+
+  while (index < line.length) {
+    const char = line[index];
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char === "[") inClass = true;
+    else if (char === "]") inClass = false;
+    else if (char === "/" && !inClass) return index + 1;
+    index += 1;
+  }
+  return index;
+}
+
+function openingTripleQuote(line: string, index: number): string | null {
+  return TRIPLE_QUOTES.find((quote) => line.startsWith(quote, index)) ?? null;
+}
+
 /**
  * Returns the code portion of `line`, advancing `state`.
  *
  * Single- and double-quoted strings are preserved because import specifiers are
- * exactly that. Template *text* is dropped because it is data, while `${ ... }`
- * expressions are kept because they are code.
+ * exactly that. Template text, triple-quoted blocks, comments and regex
+ * literals are dropped because they are data, while `${ ... }` expressions are
+ * kept because they are code.
  */
 export function codeOf(line: string, state: ScanState): string {
-  if (!state.inBlockComment && !state.inTemplate && line.trimStart().startsWith("#")) {
-    return "";
-  }
-
   let out = "";
   let index = 0;
+  let lastCode: string | undefined;
 
   while (index < line.length) {
     if (state.inBlockComment) {
@@ -60,6 +87,14 @@ export function codeOf(line: string, state: ScanState): string {
       if (close === -1) return out;
       state.inBlockComment = false;
       index = close + 2;
+      continue;
+    }
+
+    if (state.tripleQuote !== null) {
+      const close = line.indexOf(state.tripleQuote, index);
+      if (close === -1) return out;
+      index = close + state.tripleQuote.length;
+      state.tripleQuote = null;
       continue;
     }
 
@@ -92,11 +127,24 @@ export function codeOf(line: string, state: ScanState): string {
       index += 2;
       continue;
     }
+    // `#` comments Python, Ruby and shell. Requiring whitespace or line start
+    // before it keeps TypeScript private fields (`this.#count`) intact.
+    if (char === "#" && lastCode === undefined) return out;
+    if (char === "#" && /\s/.test(line[index - 1] ?? "")) return out;
+
+    const triple = openingTripleQuote(line, index);
+    if (triple) {
+      state.tripleQuote = triple;
+      index += triple.length;
+      out += " ";
+      continue;
+    }
 
     if (char === '"' || char === "'") {
       const [text, next] = consumeString(line, index, char);
       out += text;
       index = next;
+      lastCode = char;
       continue;
     }
 
@@ -105,6 +153,12 @@ export function codeOf(line: string, state: ScanState): string {
       state.interpolationDepth = 0;
       out += " ";
       index += 1;
+      continue;
+    }
+
+    if (char === "/" && (lastCode === undefined || OPERAND_POSITION.test(lastCode))) {
+      index = skipRegexLiteral(line, index);
+      out += " ";
       continue;
     }
 
@@ -119,57 +173,9 @@ export function codeOf(line: string, state: ScanState): string {
     }
 
     out += char;
+    if (!/\s/.test(char)) lastCode = char;
     index += 1;
   }
 
   return out;
-}
-
-/**
- * True when `index` falls inside a quoted string on an already-scanned line.
- *
- * `codeOf` preserves string literals because specifiers live inside them, so
- * patterns that can appear mid-line — `require(...)`, dynamic `import(...)` —
- * still have to distinguish a real call from one merely quoted inside a string.
- */
-export function insideStringLiteral(line: string, index: number): boolean {
-  let quote: string | null = null;
-
-  for (let cursor = 0; cursor < index; cursor += 1) {
-    const char = line[cursor];
-    if (char === "\\") {
-      cursor += 1;
-      continue;
-    }
-    if (quote === null && (char === '"' || char === "'")) {
-      quote = char;
-      continue;
-    }
-    if (quote !== null && char === quote) quote = null;
-  }
-
-  return quote !== null;
-}
-
-/**
- * Tracks whether the scanner is inside a Go `import ( ... )` block.
- *
- * Go import entries are bare quoted strings, far too weak a signal to match
- * anywhere in a file — any string constant would qualify.
- */
-export class GoImportBlock {
-  private open = false;
-
-  /** Feed each code line in order. Returns true if this line is inside a block. */
-  consume(line: string): boolean {
-    if (!this.open) {
-      if (/^\s*import\s*\(/.test(line)) this.open = true;
-      return false;
-    }
-    if (/^\s*\)/.test(line)) {
-      this.open = false;
-      return false;
-    }
-    return true;
-  }
 }

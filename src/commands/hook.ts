@@ -1,10 +1,12 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { loadConfig } from "../config.ts";
-import { collectPaths, hasErrors, runRules, toPosix } from "../engine.ts";
+import { hasErrors, runRules, toPosix } from "../engine.ts";
 import { matchesAny } from "../glob.ts";
-import { assertPatternsTerminate } from "../regexGuard.ts";
+import { evaluatePatterns, PATTERN_DEADLINE_MS } from "../patternEvaluator.ts";
 import { formatDenial } from "../report.ts";
-import type { FileEntry, KeelsonConfig, RawRule } from "../types.ts";
+import { bannedPatternSources } from "../rules/bannedSymbols.ts";
+import type { FileEntry, KeelsonConfig } from "../types.ts";
 import { CANNOT_RECONSTRUCT, proposedContent } from "./reconstruct.ts";
 
 interface HookInput {
@@ -16,9 +18,6 @@ interface HookInput {
 const EDITING_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
 const COMPANION_RULE_ID = "required-companion";
 const BANNED_SYMBOLS_RULE_ID = "banned-symbols";
-
-/** Budget for proving the config's patterns terminate. Generous for real ones. */
-const PATTERN_DEADLINE_MS = 1000;
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -38,33 +37,30 @@ function deny(reason: string): void {
   );
 }
 
-function rulesCovering(config: KeelsonConfig, ruleId: string, path: string): RawRule[] {
-  return config.rules.filter(
-    (rule) =>
-      rule.id === ruleId && Array.isArray(rule.files) && matchesAny(path, rule.files as string[]),
-  );
-}
-
-/** Every regex that will run against this file, read straight off the raw rules. */
+/** Only the patterns that will actually run against this file are worth guarding. */
 function patternsFor(config: KeelsonConfig, path: string): string[] {
-  return rulesCovering(config, BANNED_SYMBOLS_RULE_ID, path)
-    .flatMap((rule) => (Array.isArray(rule.symbols) ? rule.symbols : []) as { pattern?: unknown }[])
-    .map((symbol) => symbol?.pattern)
-    .filter((pattern): pattern is string => typeof pattern === "string");
+  const covering = config.rules.filter(
+    (rule) =>
+      rule.id === BANNED_SYMBOLS_RULE_ID &&
+      Array.isArray(rule.files) &&
+      matchesAny(path, rule.files as string[]),
+  );
+  return bannedPatternSources({ rules: covering });
 }
 
 /**
- * `required-companion` is the only rule needing a repo scan. Skipping it unless
- * a companion rule actually covers the edited path keeps the common edit off a
- * full directory walk.
+ * Answers path existence with a single stat against the post-edit tree.
+ *
+ * Listing the repository to answer this cost an O(repo) walk on every edit that
+ * a companion rule covered — 0.75s on a large workspace. Exclusions are honoured
+ * so the answer matches what `check` would have collected.
  */
-async function pathsForConfig(
-  config: KeelsonConfig,
-  root: string,
-  path: string,
-): Promise<string[]> {
-  if (rulesCovering(config, COMPANION_RULE_ID, path).length === 0) return [];
-  return collectPaths(root, config.exclude);
+function pathPredicate(root: string, config: KeelsonConfig, proposed: string) {
+  return (path: string): boolean => {
+    if (path === proposed) return true;
+    if (matchesAny(path, config.exclude)) return false;
+    return existsSync(join(root, path));
+  };
 }
 
 /**
@@ -116,18 +112,23 @@ export async function hookCommand(): Promise<number> {
   const content = await proposedContent(toolName, toolInput, absolutePath);
   if (content === CANNOT_RECONSTRUCT) return 0;
 
-  // Prove the patterns terminate against this content before running them
-  // in-process, where a runaway match could not be interrupted. Only patterns
-  // that actually cover this file are worth the worker.
-  await assertPatternsTerminate(patternsFor(config, path), content.split("\n"), PATTERN_DEADLINE_MS);
-
   const file: FileEntry = { path, content };
-  const existing = await pathsForConfig(config, root, path);
-  // A Write creates its target, so the proposed path is present as far as any
-  // rule reasoning about the post-edit tree is concerned.
-  const allPaths = existing.includes(path) ? existing : [...existing, path];
 
-  const violations = runRules(config, { files: [file], allPaths, root });
+  // Patterns are evaluated off the main thread under a deadline. A timeout
+  // throws, and the hook's fail-open handler turns that into no decision.
+  const matches = await evaluatePatterns(
+    patternsFor(config, path),
+    [file],
+    PATTERN_DEADLINE_MS,
+  );
+
+  const violations = runRules(config, {
+    files: [file],
+    // A Write creates its target, so the proposed path counts as existing.
+    hasPath: pathPredicate(root, config, path),
+    matches,
+    root,
+  });
   if (!hasErrors(violations)) return 0;
 
   deny(formatDenial(violations.filter((violation) => violation.severity === "error")));

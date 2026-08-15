@@ -4,11 +4,8 @@ import { bannedSymbolsRule } from "../src/rules/bannedSymbols.ts";
 import { layerBoundariesRule } from "../src/rules/layerBoundaries.ts";
 import { maxFileLinesRule } from "../src/rules/maxFileLines.ts";
 import { requiredCompanionRule } from "../src/rules/requiredCompanion.ts";
-import { ConfigError, type FileEntry, type RuleContext } from "../src/types.ts";
-
-function contextOf(files: FileEntry[], allPaths: string[] = []): RuleContext {
-  return { files, allPaths, root: "/repo" };
-}
+import { ConfigError } from "../src/types.ts";
+import { contextOf } from "./support.ts";
 
 describe("max-file-lines", () => {
   const config = maxFileLinesRule.parse({ id: "max-file-lines", files: ["**/*.ts"], max: 3 });
@@ -55,14 +52,18 @@ describe("banned-symbols", () => {
   });
 
   it("reports the offending line number", () => {
-    const ctx = contextOf([{ path: "A.java", content: "class A {\n  System.out.println(1);\n}" }]);
+    const ctx = contextOf(
+      [{ path: "A.java", content: "class A {\n  System.out.println(1);\n}" }],
+      [],
+      ["System\\.out"],
+    );
     const [violation] = bannedSymbolsRule.check(config, ctx);
     assert.equal(violation.line, 2);
     assert.equal(violation.message, "Use SLF4J");
   });
 
   it("ignores files outside the glob", () => {
-    const ctx = contextOf([{ path: "a.ts", content: "System.out" }]);
+    const ctx = contextOf([{ path: "a.ts", content: "System.out" }], [], ["System\\.out"]);
     assert.equal(bannedSymbolsRule.check(config, ctx).length, 0);
   });
 
@@ -96,7 +97,7 @@ describe("banned-symbols", () => {
       files: ["**/*.ts"],
       symbols: [{ pattern: "BAD" }],
     });
-    const ctx = contextOf([{ path: "x.ts", content: `${"x".repeat(5000)}BAD` }]);
+    const ctx = contextOf([{ path: "x.ts", content: `${"x".repeat(5000)}BAD` }], [], ["BAD"]);
     assert.equal(bannedSymbolsRule.check(cfg, ctx).length, 1);
   });
 

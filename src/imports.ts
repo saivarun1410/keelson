@@ -11,7 +11,8 @@
  * edits, which is the worst failure this tool can have.
  */
 
-import { codeOf, createScanState, GoImportBlock, insideStringLiteral } from "./scanner.ts";
+import { GoImportBlock, insideStringLiteral } from "./lineContext.ts";
+import { codeOf, createScanState } from "./scanner.ts";
 
 /** Which language's notation the specifier is written in; drives resolution. */
 export type ImportSyntax = "es" | "go" | "dotted" | "python-relative";
@@ -34,23 +35,27 @@ const ES_DYNAMIC = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/;
 const CJS_REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/;
 // Go single-line with an alias: `import alias "example.com/project/repo"`.
 const GO_ALIASED = /^\s*import\s+(?:[\w.]+|_|\.)\s+["]([^"]+)["]/;
-// Java / Kotlin / Python: `import a.b.C;`, `import a.b.C as D`, `import a.b`.
-const DOTTED_IMPORT = /^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)(?:\s+as\s+[\w.]+)?\s*;?\s*$/;
+// Java / Kotlin / Python, including `import a.b, c.d` and a trailing `as` alias.
+const DOTTED_IMPORT =
+  /^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?(?:\s*,\s*[\w.]+(?:\.\*)?)*)(?:\s+as\s+[\w.]+)?\s*;?\s*$/;
 // Python: `from .x import y`, `from ..a.b import c`.
 const PYTHON_FROM = /^\s*from\s+(\.*[\w.]*)\s+import\b/;
 // A bare quoted string, only meaningful inside a Go import block.
 const GO_ENTRY = /^\s*(?:[\w.]+\s+)?["]([^"]+)["]\s*$/;
 
+type PartialRef = Omit<ImportRef, "line">;
+
 /**
- * True when an ES import statement has begun but its specifier is on a later
- * line — `import {` with the brace still open, or a bare `import`.
+ * True when an ES statement has begun but its specifier is on a later line —
+ * `import {` with the brace still open, a bare `import`, or a dynamic
+ * `import(` / `require(` whose argument wraps.
  *
  * The unclosed-brace requirement matters: a complete dotted import such as
  * `import com.acme.Repo;` also has no quote and no `from`, and would otherwise
- * be mistaken for the start of a multi-line statement, swallowing both itself
- * and every line up to the next quote.
+ * be mistaken for the start of a multi-line statement.
  */
-function opensMultilineImport(line: string): boolean {
+function opensMultilineStatement(line: string): boolean {
+  if (/\b(?:import|require)\s*\(\s*$/.test(line)) return true;
   if (!/^\s*(?:import|export)\b/.test(line) || /["']/.test(line) || /\bfrom\b/.test(line)) {
     return false;
   }
@@ -62,10 +67,10 @@ function matchAt(line: string, pattern: RegExp): { specifier: string; index: num
   return match?.[1] ? { specifier: match[1], index: match.index } : null;
 }
 
-function scanLine(line: string, inGoBlock: boolean): Omit<ImportRef, "line"> | null {
+function scanLine(line: string, inGoBlock: boolean): PartialRef[] {
   for (const pattern of [ES_BARE, ES_FROM]) {
     const found = matchAt(line, pattern);
-    if (found) return { specifier: found.specifier, syntax: "es" };
+    if (found) return [{ specifier: found.specifier, syntax: "es" }];
   }
 
   // These can appear mid-line, so an occurrence quoted inside a string is not
@@ -73,28 +78,34 @@ function scanLine(line: string, inGoBlock: boolean): Omit<ImportRef, "line"> | n
   for (const pattern of [ES_DYNAMIC, CJS_REQUIRE]) {
     const found = matchAt(line, pattern);
     if (found && !insideStringLiteral(line, found.index)) {
-      return { specifier: found.specifier, syntax: "es" };
+      return [{ specifier: found.specifier, syntax: "es" }];
     }
   }
 
   const goAliased = matchAt(line, GO_ALIASED);
-  if (goAliased) return { specifier: goAliased.specifier, syntax: "go" };
+  if (goAliased) return [{ specifier: goAliased.specifier, syntax: "go" }];
 
   const python = matchAt(line, PYTHON_FROM);
   if (python) {
     const syntax = python.specifier.startsWith(".") ? "python-relative" : "dotted";
-    return { specifier: python.specifier, syntax };
+    return [{ specifier: python.specifier, syntax }];
   }
 
   const dotted = matchAt(line, DOTTED_IMPORT);
-  if (dotted) return { specifier: dotted.specifier, syntax: "dotted" };
+  if (dotted) {
+    return dotted.specifier
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((specifier) => ({ specifier, syntax: "dotted" as const }));
+  }
 
   if (inGoBlock) {
     const go = matchAt(line, GO_ENTRY);
-    if (go) return { specifier: go.specifier, syntax: "go" };
+    if (go) return [{ specifier: go.specifier, syntax: "go" }];
   }
 
-  return null;
+  return [];
 }
 
 export function extractImports(content: string): ImportRef[] {
@@ -110,7 +121,7 @@ export function extractImports(content: string): ImportRef[] {
 
     const inGoBlock = goBlock.consume(code);
 
-    // Continuation of a multi-line ES import: take the first quoted specifier.
+    // Continuation of a multi-line statement: take the first quoted specifier.
     if (awaitingSpecifier) {
       const found = matchAt(code, /["']([^"']+)["']/);
       if (found) {
@@ -122,12 +133,12 @@ export function extractImports(content: string): ImportRef[] {
 
     // A complete single-line import wins over the multi-line heuristic.
     const found = scanLine(code, inGoBlock);
-    if (found) {
-      refs.push({ ...found, line: index + 1 });
+    if (found.length > 0) {
+      refs.push(...found.map((ref) => ({ ...ref, line: index + 1 })));
       continue;
     }
 
-    if (opensMultilineImport(code)) awaitingSpecifier = true;
+    if (opensMultilineStatement(code)) awaitingSpecifier = true;
   }
 
   return refs;
