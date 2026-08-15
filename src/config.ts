@@ -50,7 +50,29 @@ function validateRule(entry: unknown, index: number): RawRule {
   if (raw.severity !== undefined && raw.severity !== "error" && raw.severity !== "warn") {
     throw new ConfigError(`rules[${index}] \`severity\` must be "error" or "warn"`);
   }
-  return raw;
+  return normaliseGlobFields(raw, index);
+}
+
+/** Glob fields that accept either a single glob or a list of them. */
+const GLOB_FIELDS = ["files", "from", "disallow"] as const;
+
+/**
+ * Rewrites scalar globs to single-element arrays once, at load.
+ *
+ * Both forms are valid in a config file, and consumers used to disagree about
+ * it: rules normalised internally while the hook's pattern selection tested
+ * `Array.isArray` and silently matched nothing, so a scalar `files:` enforced in
+ * CI but not at edit time.
+ */
+function normaliseGlobFields(raw: RawRule, index: number): RawRule {
+  const normalised: RawRule = { ...raw };
+
+  for (const field of GLOB_FIELDS) {
+    if (normalised[field] === undefined) continue;
+    normalised[field] = requireGlobList(normalised[field], `rules[${index}].${field}`);
+  }
+
+  return normalised;
 }
 
 export function parseConfig(source: string): KeelsonConfig {

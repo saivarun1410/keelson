@@ -68,8 +68,8 @@ describe("imports", () => {
   });
 
   it("ignores Python trailing comments, triple-quoted blocks and regex literals", () => {
-    assert.deepEqual(extractImports('do_thing()  # require("src/repository/users")'), []);
-    assert.deepEqual(extractImports('docs = """\nimport pkg.repository as repository\n"""'), []);
+    assert.deepEqual(extractImports('do_thing()  # require("src/repository/users")', "a.py"), []);
+    assert.deepEqual(extractImports('docs = """\nimport pkg.repository as repository\n"""', "a.py"), []);
     assert.deepEqual(extractImports('val docs = """\nimport com.acme.repository.Repo\n"""'), []);
     assert.deepEqual(extractImports('const pattern = /require("src/repository/users")/;'), []);
   });
@@ -85,7 +85,7 @@ describe("imports", () => {
   });
 
   it("extracts Python aliased imports with trailing comments and comma lists", () => {
-    const [aliased] = extractImports("import pkg.repository as repository  # boundary");
+    const [aliased] = extractImports("import pkg.repository as repository  # boundary", "a.py");
     assert.equal(aliased?.specifier, "pkg.repository");
     assert.deepEqual(
       extractImports("import pkg.repository, pkg.service").map((ref) => ref.specifier),
@@ -146,5 +146,46 @@ describe("imports", () => {
     const pkg = { specifier: "lodash", line: 1, syntax: "es" } as const;
     assert.equal(resolveSpecifier(rel, "src/commands/check.ts"), "src/rules/x.ts");
     assert.equal(resolveSpecifier(pkg, "src/commands/check.ts"), "lodash");
+  });
+});
+
+describe("import false positives", () => {
+  it("ignores a Python comment with no space before it", () => {
+    assert.deepEqual(extractImports('x = 1# require("src/repository/users")', "a.py"), []);
+  });
+
+  it("ignores a regex literal after return", () => {
+    assert.deepEqual(
+      extractImports('function f() {\n  return /require("src/repository/users")/;\n}'),
+      [],
+    );
+  });
+
+  it("ignores member calls that merely look like module loaders", () => {
+    assert.deepEqual(extractImports('client.require("src/repository/users");'), []);
+    assert.deepEqual(extractImports('loader.import("src/repository/users");'), []);
+  });
+
+  it("still reads module.require as a real load", () => {
+    const [ref] = extractImports('module.require("../repository/users");');
+    assert.equal(ref?.specifier, "../repository/users");
+  });
+
+  it("abandons a multiline import that closes without a literal", () => {
+    assert.deepEqual(
+      extractImports('const m = import(\n  moduleName\n);\nconst p = "src/repository/users";'),
+      [],
+    );
+  });
+
+  it("extracts per-item aliases and private-field requires", () => {
+    assert.deepEqual(
+      extractImports("import pkg.repository as repo, pkg.service as service", "a.py").map(
+        (ref) => ref.specifier,
+      ),
+      ["pkg.repository", "pkg.service"],
+    );
+    const [ref] = extractImports('class A {\n  #repo = require("src/repository/users");\n}');
+    assert.equal(ref?.specifier, "src/repository/users");
   });
 });

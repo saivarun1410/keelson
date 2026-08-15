@@ -3,7 +3,7 @@ import { collectPaths, hasErrors, readFiles, runRules } from "../engine.ts";
 import { matchesAny } from "../glob.ts";
 import { evaluatePatterns, PATTERN_DEADLINE_MS } from "../patternEvaluator.ts";
 import { formatReport } from "../report.ts";
-import { bannedPatternSources } from "../rules/bannedSymbols.ts";
+import { patternSelector } from "../rules/bannedSymbols.ts";
 
 /**
  * CI-side enforcement. Same rules, same engine and the same guarded pattern
@@ -23,7 +23,7 @@ export async function checkCommand(argv: readonly string[]): Promise<number> {
 
   const files = await readFiles(root, targets);
   const known = new Set(allPaths);
-  const matches = await evaluatePatterns(bannedPatternSources(config), files, PATTERN_DEADLINE_MS);
+  const matches = await evaluatePatterns(files, patternSelector(config), PATTERN_DEADLINE_MS);
 
   const violations = runRules(config, {
     files,

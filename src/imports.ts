@@ -37,7 +37,7 @@ const CJS_REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/;
 const GO_ALIASED = /^\s*import\s+(?:[\w.]+|_|\.)\s+["]([^"]+)["]/;
 // Java / Kotlin / Python, including `import a.b, c.d` and a trailing `as` alias.
 const DOTTED_IMPORT =
-  /^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?(?:\s*,\s*[\w.]+(?:\.\*)?)*)(?:\s+as\s+[\w.]+)?\s*;?\s*$/;
+  /^\s*import\s+(?:static\s+)?((?:[\w.]+(?:\.\*)?(?:\s+as\s+[\w.]+)?)(?:\s*,\s*[\w.]+(?:\.\*)?(?:\s+as\s+[\w.]+)?)*)\s*;?\s*$/;
 // Python: `from .x import y`, `from ..a.b import c`.
 const PYTHON_FROM = /^\s*from\s+(\.*[\w.]*)\s+import\b/;
 // A bare quoted string, only meaningful inside a Go import block.
@@ -62,6 +62,13 @@ function opensMultilineStatement(line: string): boolean {
   return /\{[^}]*$/.test(line) || /^\s*import\s*$/.test(line);
 }
 
+/** True when the match is a property access, e.g. `client.require(...)`. */
+function isMemberCall(line: string, index: number): boolean {
+  const before = line.slice(0, index).trimEnd();
+  if (!before.endsWith(".")) return false;
+  return !/\bmodule\.$/.test(before);
+}
+
 function matchAt(line: string, pattern: RegExp): { specifier: string; index: number } | null {
   const match = pattern.exec(line);
   return match?.[1] ? { specifier: match[1], index: match.index } : null;
@@ -74,10 +81,12 @@ function scanLine(line: string, inGoBlock: boolean): PartialRef[] {
   }
 
   // These can appear mid-line, so an occurrence quoted inside a string is not
-  // a dependency — `const doc = 'call require("x")'` must not match.
+  // a dependency — `const doc = 'call require("x")'` must not match — and a
+  // member call such as `client.require("x")` is an unrelated method, not a
+  // module load. `module.require` is the one member form that really loads.
   for (const pattern of [ES_DYNAMIC, CJS_REQUIRE]) {
     const found = matchAt(line, pattern);
-    if (found && !insideStringLiteral(line, found.index)) {
+    if (found && !insideStringLiteral(line, found.index) && !isMemberCall(line, found.index)) {
       return [{ specifier: found.specifier, syntax: "es" }];
     }
   }
@@ -95,7 +104,7 @@ function scanLine(line: string, inGoBlock: boolean): PartialRef[] {
   if (dotted) {
     return dotted.specifier
       .split(",")
-      .map((entry) => entry.trim())
+      .map((entry) => entry.trim().replace(/\s+as\s+[\w.]+$/, ""))
       .filter(Boolean)
       .map((specifier) => ({ specifier, syntax: "dotted" as const }));
   }
@@ -108,10 +117,10 @@ function scanLine(line: string, inGoBlock: boolean): PartialRef[] {
   return [];
 }
 
-export function extractImports(content: string): ImportRef[] {
+export function extractImports(content: string, path = ""): ImportRef[] {
   const refs: ImportRef[] = [];
   const lines = content.split("\n");
-  const scanState = createScanState();
+  const scanState = createScanState(path);
   const goBlock = new GoImportBlock();
   let awaitingSpecifier = false;
 
@@ -127,7 +136,11 @@ export function extractImports(content: string): ImportRef[] {
       if (found) {
         refs.push({ specifier: found.specifier, line: index + 1, syntax: "es" });
         awaitingSpecifier = false;
+        continue;
       }
+      // The statement closed with no literal — `import(moduleName)`. Give up,
+      // or the next unrelated string in the file gets claimed as its specifier.
+      if (/[);]/.test(code)) awaitingSpecifier = false;
       continue;
     }
 
