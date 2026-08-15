@@ -9,53 +9,19 @@
  * pass per line and still needs no parser.
  */
 
+import { opensTag, stepJsx } from "./jsx.ts";
+import {
+  CONTROL_KEYWORDS,
+  createScanState,
+  OPERAND_KEYWORDS,
+  OPERAND_POSITION,
+  type ScanState,
+} from "./scanState.ts";
 import {
   consumeString,
   openingTripleQuote,
   skipRegexLiteral,
 } from "./scanTokens.ts";
-
-export interface ScanState {
-  /**
-   * Whether `#` starts a comment in this file's language.
-   *
-   * It cannot be decided from the character alone: `#` opens a comment in
-   * Python, Ruby and shell, but declares a private field in TypeScript, where
-   * treating `#repo = require("x")` as a comment would hide a real dependency.
-   */
-  hashComments: boolean;
-  inBlockComment: boolean;
-  inTemplate: boolean;
-  /** The delimiter of an open triple-quoted string, or null. */
-  tripleQuote: string | null;
-  /** Nesting depth inside `${ ... }`; 0 means plain template text. */
-  interpolationDepth: number;
-}
-
-const HASH_COMMENT_FILES = /\.(py|pyi|rb|sh|bash|zsh|ya?ml|toml|pl|r|tf|conf)$/i;
-
-export function createScanState(path = ""): ScanState {
-  return {
-    hashComments: HASH_COMMENT_FILES.test(path),
-    inBlockComment: false,
-    inTemplate: false,
-    tripleQuote: null,
-    interpolationDepth: 0,
-  };
-}
-
-/** Characters after which a `/` begins a regex literal rather than a division. */
-const OPERAND_POSITION = /[(,=:[!&|?{};+\-*%~^<>]/;
-
-/**
- * Keywords after which a `/` also begins a regex literal. Looking only at the
- * previous character misses these, so `return /require("x")/` was read as a
- * division and its contents extracted as a dependency.
- */
-const OPERAND_KEYWORDS = new Set([
-  "return", "typeof", "case", "in", "of", "delete", "void",
-  "throw", "new", "do", "else", "yield", "await",
-]);
 
 /**
  * Returns the code portion of `line`, advancing `state`.
@@ -71,6 +37,11 @@ export function codeOf(line: string, state: ScanState): string {
   let lastCode: string | undefined;
   let word = "";
   let previousWord = "";
+  let parenDepth = 0;
+  const controlParens: number[] = [];
+  // Set by the `)` that closes a control condition: what follows is a
+  // statement, so `if (on) /re/.test(x)` is a regex literal, not a division.
+  let afterControlParen = false;
 
   while (index < line.length) {
     if (state.inBlockComment) {
@@ -148,11 +119,40 @@ export function codeOf(line: string, state: ScanState): string {
     // separated from it by whitespace (`return /x/`), so check both.
     const precedingWord = word !== "" ? word : previousWord;
     const afterOperand =
-      lastCode === undefined || OPERAND_POSITION.test(lastCode) || OPERAND_KEYWORDS.has(precedingWord);
+      lastCode === undefined ||
+      OPERAND_POSITION.test(lastCode) ||
+      OPERAND_KEYWORDS.has(precedingWord) ||
+      afterControlParen;
     if (char === "/" && afterOperand) {
       index = skipRegexLiteral(line, index);
       out += " ";
+      afterControlParen = false;
       continue;
+    }
+
+    // JSX children and attributes are prose; `{ ... }` inside them is code.
+    const jsxStep = stepJsx(line, index, state.jsx);
+    if (jsxStep.kind === "skip") {
+      index = jsxStep.next;
+      out += " ";
+      continue;
+    }
+    if (jsxStep.kind === "none" && char === "<" && opensTag(line, index, afterOperand)) {
+      state.jsx.inTag = true;
+      index += 1;
+      out += " ";
+      continue;
+    }
+
+    if (char === "(") {
+      parenDepth += 1;
+      if (CONTROL_KEYWORDS.has(precedingWord)) controlParens.push(parenDepth);
+    } else if (char === ")") {
+      if (controlParens.at(-1) === parenDepth) {
+        controlParens.pop();
+        afterControlParen = true;
+      }
+      parenDepth -= 1;
     }
 
     if (state.interpolationDepth > 0) {
@@ -166,7 +166,10 @@ export function codeOf(line: string, state: ScanState): string {
     }
 
     out += char;
-    if (!/\s/.test(char)) lastCode = char;
+    if (!/\s/.test(char)) {
+      if (char !== ")") afterControlParen = false;
+      lastCode = char;
+    }
     if (/[A-Za-z_$]/.test(char)) {
       word += char;
     } else if (word !== "") {

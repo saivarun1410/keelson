@@ -23,7 +23,11 @@ export async function checkCommand(argv: readonly string[]): Promise<number> {
 
   const files = await readFiles(root, targets);
   const known = new Set(allPaths);
-  const matches = await evaluatePatterns(files, patternSelector(config), PATTERN_DEADLINE_MS);
+  const { matches, timeouts } = await evaluatePatterns(
+    files,
+    patternSelector(config),
+    PATTERN_DEADLINE_MS,
+  );
 
   const violations = runRules(config, {
     files,
@@ -33,5 +37,19 @@ export async function checkCommand(argv: readonly string[]): Promise<number> {
   });
 
   process.stdout.write(`${formatReport(violations)}\n`);
+
+  // Violations are identical to what the hook computed for the same content;
+  // the timeout is reported separately, as the configuration error it is. CI
+  // still fails on it, because a pattern that silently stops being enforced is
+  // worse than one that fails loudly.
+  for (const timeout of timeouts) {
+    process.stderr.write(
+      `keelson: skipped ${timeout.patterns.length} banned-symbols pattern(s) for ` +
+        `${timeout.path} after ${PATTERN_DEADLINE_MS}ms. Rewrite the pattern that ` +
+        `backtracks catastrophically.\n`,
+    );
+  }
+
+  if (timeouts.length > 0) return 2;
   return hasErrors(violations) ? 1 : 0;
 }
