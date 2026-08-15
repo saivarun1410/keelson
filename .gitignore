@@ -7,3 +7,6 @@ dist/
 # Note: docs/*.gif is deliberately NOT ignored — GitHub can only render the
 # README hero image if the GIF is committed. Regenerate with:
 #   cd demo && vhs hero.tape
+
+# Private launch notes — never published.
+LAUNCH-KIT.local.md
