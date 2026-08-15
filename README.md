@@ -44,7 +44,7 @@ Then wire up the hook in `.claude/settings.json`:
 }
 ```
 
-Keep the `timeout`. keelson rejects catastrophically backtracking patterns when it loads your config, but regex execution is synchronous and cannot be interrupted from inside the process, so the timeout is your outer bound if a pathological pattern ever gets through.
+Keep the `timeout` as a backstop. keelson bounds its own regex execution (see below), but a timeout costs nothing and is the last line if anything else goes wrong.
 
 And the same rules in CI:
 
@@ -110,7 +110,8 @@ Import extraction currently understands ES modules, CommonJS, Java/Kotlin, Pytho
 ## Design guarantees
 
 - **Fails open, always.** A malformed payload, a missing config, an unreadable file, an edit it cannot reconstruct exactly, or a bug in keelson exits 0 with no decision. A tool that wedges your session when it breaks gets uninstalled. It will never block you for its own reasons — only for yours.
-- **~33ms per hook invocation**, of which ~17ms is Node's own startup. Bundled to a single minified file with one runtime dependency. The repo scan that `required-companion` needs is skipped entirely unless a companion rule covers the file being edited.
+- **A pathological regex cannot hang your session.** Regex execution is synchronous: once a catastrophically backtracking pattern starts on the main thread, nothing can interrupt it — not a `try`/`catch`, not a timer — so failing open would be impossible. Before any pattern runs in-process, keelson proves it terminates against the actual content in a worker under a hard deadline, and fails open if that deadline passes. Shape heuristics are not enough here: `^(a|aa)+$` is exponential with no nested quantifier anywhere in it.
+- **~34ms per hook invocation**, of which ~17ms is Node's own startup. That rises to ~46ms for files covered by a `banned-symbols` rule, which is the cost of the guarantee above; files no such rule matches skip it entirely. Likewise the repo scan `required-companion` needs is skipped unless a companion rule covers the file being edited.
 - **False positives are treated as the worst class of bug.** Blocking a legitimate edit stops your work and teaches you to uninstall the tool; missing a violation only leaves you where you started. Import detection is deliberately conservative for this reason — quoted strings, commented-out code, and Go strings outside an import block are not dependencies.
 - **Same engine both sides.** `check` and `hook` run identical rule code, so the hook can't disagree with CI.
 - **keelson enforces its own `keelson.yaml` on itself**, in CI and at edit time. See the repo root.

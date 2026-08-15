@@ -21,21 +21,13 @@ interface BannedSymbolsConfig {
 const NESTED_QUANTIFIER = /\([^()]*[+*][^()]*\)\s*[+*]|\([^()]*[+*][^()]*\)\s*\{\d+,\}/;
 
 /**
- * Lines longer than this are not scanned. Real source lines are far shorter;
- * this bounds the damage from minified or generated files landing in scope.
- */
-const MAX_SCANNED_LINE_LENGTH = 4000;
-
-/**
- * Rejects patterns that can backtrack catastrophically.
+ * Rejects the most common accidental catastrophic-backtracking shape early,
+ * with a message that names the problem.
  *
- * This has to happen at parse time. Regex execution is synchronous, so a
- * runaway match cannot be interrupted — not by a try/catch, not by a timer —
- * and it would hang the hook past the point where the fail-open handler could
- * ever run. Refusing the pattern up front is the only in-process defence.
- *
- * This is a heuristic, not a proof: it catches the common accidental shapes,
- * not every pathological regex. See the hook timeout guidance in the README.
+ * This is a diagnostic, not the safety mechanism. It cannot be: `^(a|aa)+$`
+ * backtracks exponentially with no nested quantifier at all. The actual
+ * guarantee comes from evaluating patterns in a worker under a deadline before
+ * they run on the main thread — see `src/regexGuard.ts`.
  */
 function assertSafePattern(pattern: string, index: number): void {
   if (NESTED_QUANTIFIER.test(pattern)) {
@@ -54,6 +46,11 @@ function parseSymbol(entry: unknown, index: number): BannedSymbol {
   const { pattern, message } = entry as { pattern?: unknown; message?: unknown };
   if (typeof pattern !== "string" || pattern.length === 0) {
     throw new ConfigError(`banned-symbols[${index}] requires a \`pattern\` string`);
+  }
+  if (message !== undefined && typeof message !== "string") {
+    throw new ConfigError(
+      `banned-symbols[${index}] \`message\` must be a string, got ${JSON.stringify(message)}`,
+    );
   }
 
   assertSafePattern(pattern, index);
@@ -96,8 +93,6 @@ export const bannedSymbolsRule: Rule<BannedSymbolsConfig> = {
       const lines = file.content.split("\n");
       for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index];
-        if (line.length > MAX_SCANNED_LINE_LENGTH) continue;
-
         for (const symbol of config.symbols) {
           if (!symbol.pattern.test(line)) continue;
           violations.push({

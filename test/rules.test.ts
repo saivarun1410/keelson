@@ -78,6 +78,28 @@ describe("banned-symbols", () => {
     }
   });
 
+  it("rejects a non-string message at parse time", () => {
+    assert.throws(
+      () =>
+        bannedSymbolsRule.parse({
+          id: "banned-symbols",
+          files: ["*.ts"],
+          symbols: [{ pattern: "BAD", message: 123 }],
+        }),
+      ConfigError,
+    );
+  });
+
+  it("scans long lines rather than silently skipping them", () => {
+    const cfg = bannedSymbolsRule.parse({
+      id: "banned-symbols",
+      files: ["**/*.ts"],
+      symbols: [{ pattern: "BAD" }],
+    });
+    const ctx = contextOf([{ path: "x.ts", content: `${"x".repeat(5000)}BAD` }]);
+    assert.equal(bannedSymbolsRule.check(cfg, ctx).length, 1);
+  });
+
   it("still accepts ordinary quantified patterns", () => {
     assert.doesNotThrow(() =>
       bannedSymbolsRule.parse({

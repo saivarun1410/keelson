@@ -11,7 +11,7 @@
  * edits, which is the worst failure this tool can have.
  */
 
-import { GoImportBlock, insideStringLiteral, stripComment } from "./importScanner.ts";
+import { codeOf, createScanState, GoImportBlock, insideStringLiteral } from "./scanner.ts";
 
 /** Which language's notation the specifier is written in; drives resolution. */
 export type ImportSyntax = "es" | "go" | "dotted" | "python-relative";
@@ -32,6 +32,8 @@ const ES_FROM = /^\s*(?:import|export)\b[^'"]*\bfrom\s*["']([^"']+)["']/;
 // `await import("x")` anywhere on the line.
 const ES_DYNAMIC = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/;
 const CJS_REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/;
+// Go single-line with an alias: `import alias "example.com/project/repo"`.
+const GO_ALIASED = /^\s*import\s+(?:[\w.]+|_|\.)\s+["]([^"]+)["]/;
 // Java / Kotlin / Python: `import a.b.C;`, `import a.b.C as D`, `import a.b`.
 const DOTTED_IMPORT = /^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)(?:\s+as\s+[\w.]+)?\s*;?\s*$/;
 // Python: `from .x import y`, `from ..a.b import c`.
@@ -49,7 +51,9 @@ const GO_ENTRY = /^\s*(?:[\w.]+\s+)?["]([^"]+)["]\s*$/;
  * and every line up to the next quote.
  */
 function opensMultilineImport(line: string): boolean {
-  if (!/^\s*import\b/.test(line) || /["']/.test(line) || /\bfrom\b/.test(line)) return false;
+  if (!/^\s*(?:import|export)\b/.test(line) || /["']/.test(line) || /\bfrom\b/.test(line)) {
+    return false;
+  }
   return /\{[^}]*$/.test(line) || /^\s*import\s*$/.test(line);
 }
 
@@ -64,14 +68,17 @@ function scanLine(line: string, inGoBlock: boolean): Omit<ImportRef, "line"> | n
     if (found) return { specifier: found.specifier, syntax: "es" };
   }
 
-  // Dynamic import and require can appear mid-line, so they must not be picked
-  // up from inside a quoted string.
+  // These can appear mid-line, so an occurrence quoted inside a string is not
+  // a dependency — `const doc = 'call require("x")'` must not match.
   for (const pattern of [ES_DYNAMIC, CJS_REQUIRE]) {
     const found = matchAt(line, pattern);
     if (found && !insideStringLiteral(line, found.index)) {
       return { specifier: found.specifier, syntax: "es" };
     }
   }
+
+  const goAliased = matchAt(line, GO_ALIASED);
+  if (goAliased) return { specifier: goAliased.specifier, syntax: "go" };
 
   const python = matchAt(line, PYTHON_FROM);
   if (python) {
@@ -93,13 +100,13 @@ function scanLine(line: string, inGoBlock: boolean): Omit<ImportRef, "line"> | n
 export function extractImports(content: string): ImportRef[] {
   const refs: ImportRef[] = [];
   const lines = content.split("\n");
-  const commentState = { inBlockComment: false };
+  const scanState = createScanState();
   const goBlock = new GoImportBlock();
   let awaitingSpecifier = false;
 
   for (let index = 0; index < lines.length; index += 1) {
-    const code = stripComment(lines[index], commentState);
-    if (code === null || code.trim() === "") continue;
+    const code = codeOf(lines[index], scanState);
+    if (code.trim() === "") continue;
 
     const inGoBlock = goBlock.consume(code);
 

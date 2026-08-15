@@ -59,6 +59,36 @@ describe("imports", () => {
     assert.deepEqual(extractImports('/*\nimport { R } from "../repository/r.ts";\n*/'), []);
   });
 
+  it("ignores trailing comments and multiline template text", () => {
+    assert.deepEqual(extractImports('doThing(); // require("src/repository/users")'), []);
+    assert.deepEqual(
+      extractImports('const docs = `\nimport { R } from "src/repository/users";\n`;'),
+      [],
+    );
+  });
+
+  it("keeps a specifier containing // inside a string", () => {
+    const [ref] = extractImports('import x from "http://example.com/m.js";');
+    assert.equal(ref?.specifier, "http://example.com/m.js");
+  });
+
+  it("reads require inside template interpolation as real code", () => {
+    const [ref] = extractImports('const v = `loaded: ${require("../repository/users")}`;');
+    assert.equal(ref?.specifier, "../repository/users");
+  });
+
+  it("extracts multiline re-exports and aliased Go imports", () => {
+    const [reExport] = extractImports('export {\n  Repo\n} from "../repository/users";');
+    assert.equal(reExport?.specifier, "../repository/users");
+    const [goAlias] = extractImports('import alias "example.com/project/repository"');
+    assert.equal(goAlias?.specifier, "example.com/project/repository");
+  });
+
+  it("extracts a dotted import that has a trailing comment", () => {
+    const [ref] = extractImports("import com.acme.repository.Repo; // boundary");
+    assert.equal(ref?.specifier, "com.acme.repository.Repo");
+  });
+
   it("extracts Go entries only inside an import block", () => {
     const found = extractImports('import (\n    "fmt"\n)\n\nconst x = "not/an/import"');
     assert.deepEqual(
