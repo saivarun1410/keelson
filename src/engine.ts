@@ -1,19 +1,32 @@
+import type { Dirent } from "node:fs";
 import { glob, readFile } from "node:fs/promises";
 import { relative, sep } from "node:path";
 import { matchesAny } from "./glob.ts";
 import { RULES } from "./rules/index.ts";
 import type { FileEntry, KeelsonConfig, RuleContext, Violation } from "./types.ts";
 
-/** Node 22 ships fs.glob, so file discovery costs no dependency and no startup time. */
+/**
+ * Node 22 ships fs.glob, so file discovery costs no dependency and no startup
+ * time.
+ *
+ * Exclusions are handed to the walker rather than applied to its output.
+ * Filtering afterwards still descends into `node_modules` and every other
+ * ignored tree, which dominates the cost on a large repo.
+ */
 export async function collectPaths(root: string, exclude: readonly string[]): Promise<string[]> {
   const paths: string[] = [];
 
-  for await (const entry of glob("**/*", { cwd: root, withFileTypes: true })) {
+  // Exclusion globs describe files (`**/node_modules/**`), so a directory is
+  // pruned when a hypothetical child of it would be excluded.
+  const isExcluded = (entry: Dirent): boolean => {
+    const path = toPosix(relative(root, `${entry.parentPath}${sep}${entry.name}`));
+    if (path === "") return false;
+    return entry.isDirectory() ? matchesAny(`${path}/_`, exclude) : matchesAny(path, exclude);
+  };
+
+  for await (const entry of glob("**/*", { cwd: root, withFileTypes: true, exclude: isExcluded })) {
     if (!entry.isFile()) continue;
-    const absolute = `${entry.parentPath}${sep}${entry.name}`;
-    const path = toPosix(relative(root, absolute));
-    if (matchesAny(path, exclude)) continue;
-    paths.push(path);
+    paths.push(toPosix(relative(root, `${entry.parentPath}${sep}${entry.name}`)));
   }
 
   return paths.sort();

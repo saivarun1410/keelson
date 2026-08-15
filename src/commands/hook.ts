@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { loadConfig } from "../config.ts";
 import { collectPaths, hasErrors, runRules, toPosix } from "../engine.ts";
 import { matchesAny } from "../glob.ts";
 import { formatDenial } from "../report.ts";
-import type { FileEntry, KeelsonConfig } from "../types.ts";
+import type { FileEntry, KeelsonConfig, RawRule } from "../types.ts";
 
 interface HookInput {
   tool_name?: string;
@@ -21,38 +21,68 @@ interface EditOperation {
 const EDITING_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
 const COMPANION_RULE_ID = "required-companion";
 
+/** Reconstruction failed; keelson must stay out of the way. */
+const CANNOT_RECONSTRUCT = Symbol("cannot-reconstruct");
+type Reconstructed = string | typeof CANNOT_RECONSTRUCT;
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function applyEdit(content: string, edit: EditOperation): string {
-  const oldString = typeof edit.old_string === "string" ? edit.old_string : "";
-  const newString = typeof edit.new_string === "string" ? edit.new_string : "";
+/**
+ * Applies one edit exactly as the editing tool would.
+ *
+ * The replacement must be a function. Passing the string directly makes
+ * `String.replace` interpret `$&`, `` $` ``, `$'` and `$$` as insertion
+ * patterns, while the real tool writes them literally — so keelson would judge
+ * content that is never going to exist.
+ */
+function applyEdit(content: string, edit: EditOperation): Reconstructed {
+  const { old_string: oldString, new_string: newString } = edit;
+  if (typeof oldString !== "string" || typeof newString !== "string") {
+    return CANNOT_RECONSTRUCT;
+  }
   if (oldString === "") return content;
+
   return edit.replace_all === true
-    ? content.replaceAll(oldString, newString)
-    : content.replace(oldString, newString);
+    ? content.replaceAll(oldString, () => newString)
+    : content.replace(oldString, () => newString);
 }
 
 /**
- * Reconstructs what the file will contain if the tool call succeeds. Checking
- * the proposed content is what lets keelson reject an edit before it lands,
- * rather than reporting on damage already done.
+ * Reconstructs what the file will contain if the tool call succeeds, or
+ * CANNOT_RECONSTRUCT when the payload is malformed or the file is unreadable.
+ *
+ * Substituting "" for missing content used to let rules run — and deny — on a
+ * file whose contents keelson had never actually seen.
  */
-async function proposedContent(toolName: string, input: Record<string, unknown>): Promise<string> {
+async function proposedContent(
+  toolName: string,
+  input: Record<string, unknown>,
+  absolutePath: string,
+): Promise<Reconstructed> {
   if (toolName === "Write") {
-    return typeof input.content === "string" ? input.content : "";
+    return typeof input.content === "string" ? input.content : CANNOT_RECONSTRUCT;
   }
 
-  const filePath = input.file_path as string;
-  const current = await readFile(filePath, "utf8").catch(() => "");
+  let current: string;
+  try {
+    current = await readFile(absolutePath, "utf8");
+  } catch {
+    return CANNOT_RECONSTRUCT;
+  }
 
   if (toolName === "Edit") return applyEdit(current, input as EditOperation);
 
-  const edits = Array.isArray(input.edits) ? (input.edits as EditOperation[]) : [];
-  return edits.reduce(applyEdit, current);
+  if (!Array.isArray(input.edits)) return CANNOT_RECONSTRUCT;
+  let content: Reconstructed = current;
+  for (const edit of input.edits as EditOperation[]) {
+    if (content === CANNOT_RECONSTRUCT) return CANNOT_RECONSTRUCT;
+    content = applyEdit(content, edit);
+  }
+  return content;
 }
 
 function deny(reason: string): void {
@@ -67,10 +97,45 @@ function deny(reason: string): void {
   );
 }
 
-/** `required-companion` is the only rule needing a repo scan; skip it otherwise. */
-async function pathsForConfig(config: KeelsonConfig, root: string): Promise<string[]> {
-  const needsScan = config.rules.some((rule) => rule.id === COMPANION_RULE_ID);
-  return needsScan ? collectPaths(root, config.exclude) : [];
+function companionRulesMatching(config: KeelsonConfig, path: string): RawRule[] {
+  return config.rules.filter(
+    (rule) =>
+      rule.id === COMPANION_RULE_ID &&
+      Array.isArray(rule.files) &&
+      matchesAny(path, rule.files as string[]),
+  );
+}
+
+/**
+ * `required-companion` is the only rule needing a repo scan. Skipping it unless
+ * a companion rule actually covers the edited path keeps the common edit off a
+ * full directory walk.
+ */
+async function pathsForConfig(
+  config: KeelsonConfig,
+  root: string,
+  path: string,
+): Promise<string[]> {
+  if (companionRulesMatching(config, path).length === 0) return [];
+  return collectPaths(root, config.exclude);
+}
+
+/**
+ * Resolves the tool's path against the payload cwd and returns it relative to
+ * the config root, or null when it falls outside.
+ *
+ * Both halves matter: without resolution `./src/a.ts` fails to match the glob
+ * `src/**` that its materialised form will match, and `src/../../outside.ts`
+ * escapes the root while still passing a naive `startsWith("..")` test.
+ */
+function repoRelativePath(filePath: string, cwd: string, root: string): string | null {
+  const absolute = isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
+  const relativePath = relative(root, absolute);
+
+  const escapesRoot =
+    relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath);
+
+  return escapesRoot ? null : toPosix(relativePath);
 }
 
 /**
@@ -92,18 +157,25 @@ export async function hookCommand(): Promise<number> {
   const toolInput = input.tool_input ?? {};
   const filePath = toolInput.file_path;
 
-  if (!EDITING_TOOLS.has(toolName) || typeof filePath !== "string") return 0;
+  if (!EDITING_TOOLS.has(toolName) || typeof filePath !== "string" || filePath === "") return 0;
 
-  const { config, root } = await loadConfig(input.cwd ?? process.cwd());
-  const path = toPosix(isAbsolute(filePath) ? relative(root, filePath) : filePath);
+  const cwd = input.cwd ?? process.cwd();
+  const { config, root } = await loadConfig(cwd);
+  const path = repoRelativePath(filePath, cwd, root);
 
-  // An edit outside the config root, or into an excluded path, is not ours to judge.
-  if (path.startsWith("..") || matchesAny(path, config.exclude)) return 0;
+  if (path === null || matchesAny(path, config.exclude)) return 0;
 
-  const file: FileEntry = { path, content: await proposedContent(toolName, toolInput) };
-  const allPaths = await pathsForConfig(config, root);
+  const absolutePath = isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
+  const content = await proposedContent(toolName, toolInput, absolutePath);
+  if (content === CANNOT_RECONSTRUCT) return 0;
+
+  const file: FileEntry = { path, content };
+  const existing = await pathsForConfig(config, root, path);
+  // A Write creates its target, so the proposed path is present as far as any
+  // rule reasoning about the post-edit tree is concerned.
+  const allPaths = existing.includes(path) ? existing : [...existing, path];
+
   const violations = runRules(config, { files: [file], allPaths, root });
-
   if (!hasErrors(violations)) return 0;
 
   deny(formatDenial(violations.filter((violation) => violation.severity === "error")));

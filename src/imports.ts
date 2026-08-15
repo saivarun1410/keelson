@@ -3,66 +3,132 @@
  *
  * keelson deliberately does not parse an AST. A per-language parser would mean a
  * per-language tool, and the whole point is that one rule file covers a polyglot
- * repo. Line-oriented patterns cover the import syntax of every language we care
- * about, give line numbers for free, and stay fast enough for the hook hot path.
+ * repo. Line-oriented scanning covers the import syntax of every language we
+ * care about, gives line numbers for free, and stays fast on the hook hot path.
+ *
+ * The patterns are deliberately strict about context: a specifier is only an
+ * import if the surrounding line says so. Over-matching here blocks legitimate
+ * edits, which is the worst failure this tool can have.
  */
+
+import { GoImportBlock, insideStringLiteral, stripComment } from "./importScanner.ts";
+
+/** Which language's notation the specifier is written in; drives resolution. */
+export type ImportSyntax = "es" | "go" | "dotted" | "python-relative";
 
 export interface ImportRef {
   /** The literal specifier as written: "./foo.js", "lodash", "com.acme.Repo". */
   specifier: string;
   /** 1-indexed line in the source file. */
   line: number;
+  syntax: ImportSyntax;
 }
 
-/** Each pattern captures the import specifier in group 1. */
-const IMPORT_PATTERNS: readonly RegExp[] = [
-  // ES modules and re-exports: import x from "y" / import "y" / export * from "y"
-  /^\s*(?:import|export)\b[^"'`]*["']([^"']+)["']/,
-  // CommonJS: require("y")
-  /\brequire\(\s*["']([^"']+)["']\s*\)/,
-  // Go import lines inside a block: "fmt" or alias "fmt"
-  /^\s*(?:[\w.]+\s+)?["]([\w./-]+)["]\s*$/,
-  // Java / Kotlin: import static? a.b.C;
-  /^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;/,
-  // Python: from a.b import c
-  /^\s*from\s+([\w.]+)\s+import\b/,
-  // Python: import a.b
-  /^\s*import\s+([\w.]+)\s*$/,
-];
+// `import "x"` — side-effect only.
+const ES_BARE = /^\s*import\s+["']([^"']+)["']/;
+// `import x from "y"` / `export { x } from "y"` — the `from` keyword is required,
+// which is what keeps `export const route = "src/repository/users"` out.
+const ES_FROM = /^\s*(?:import|export)\b[^'"]*\bfrom\s*["']([^"']+)["']/;
+// `await import("x")` anywhere on the line.
+const ES_DYNAMIC = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/;
+const CJS_REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/;
+// Java / Kotlin / Python: `import a.b.C;`, `import a.b.C as D`, `import a.b`.
+const DOTTED_IMPORT = /^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)(?:\s+as\s+[\w.]+)?\s*;?\s*$/;
+// Python: `from .x import y`, `from ..a.b import c`.
+const PYTHON_FROM = /^\s*from\s+(\.*[\w.]*)\s+import\b/;
+// A bare quoted string, only meaningful inside a Go import block.
+const GO_ENTRY = /^\s*(?:[\w.]+\s+)?["]([^"]+)["]\s*$/;
+
+/**
+ * True when an ES import statement has begun but its specifier is on a later
+ * line — `import {` with the brace still open, or a bare `import`.
+ *
+ * The unclosed-brace requirement matters: a complete dotted import such as
+ * `import com.acme.Repo;` also has no quote and no `from`, and would otherwise
+ * be mistaken for the start of a multi-line statement, swallowing both itself
+ * and every line up to the next quote.
+ */
+function opensMultilineImport(line: string): boolean {
+  if (!/^\s*import\b/.test(line) || /["']/.test(line) || /\bfrom\b/.test(line)) return false;
+  return /\{[^}]*$/.test(line) || /^\s*import\s*$/.test(line);
+}
+
+function matchAt(line: string, pattern: RegExp): { specifier: string; index: number } | null {
+  const match = pattern.exec(line);
+  return match?.[1] ? { specifier: match[1], index: match.index } : null;
+}
+
+function scanLine(line: string, inGoBlock: boolean): Omit<ImportRef, "line"> | null {
+  for (const pattern of [ES_BARE, ES_FROM]) {
+    const found = matchAt(line, pattern);
+    if (found) return { specifier: found.specifier, syntax: "es" };
+  }
+
+  // Dynamic import and require can appear mid-line, so they must not be picked
+  // up from inside a quoted string.
+  for (const pattern of [ES_DYNAMIC, CJS_REQUIRE]) {
+    const found = matchAt(line, pattern);
+    if (found && !insideStringLiteral(line, found.index)) {
+      return { specifier: found.specifier, syntax: "es" };
+    }
+  }
+
+  const python = matchAt(line, PYTHON_FROM);
+  if (python) {
+    const syntax = python.specifier.startsWith(".") ? "python-relative" : "dotted";
+    return { specifier: python.specifier, syntax };
+  }
+
+  const dotted = matchAt(line, DOTTED_IMPORT);
+  if (dotted) return { specifier: dotted.specifier, syntax: "dotted" };
+
+  if (inGoBlock) {
+    const go = matchAt(line, GO_ENTRY);
+    if (go) return { specifier: go.specifier, syntax: "go" };
+  }
+
+  return null;
+}
 
 export function extractImports(content: string): ImportRef[] {
   const refs: ImportRef[] = [];
   const lines = content.split("\n");
+  const commentState = { inBlockComment: false };
+  const goBlock = new GoImportBlock();
+  let awaitingSpecifier = false;
 
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!line.includes("import") && !line.includes("require") && !line.includes('"')) {
+    const code = stripComment(lines[index], commentState);
+    if (code === null || code.trim() === "") continue;
+
+    const inGoBlock = goBlock.consume(code);
+
+    // Continuation of a multi-line ES import: take the first quoted specifier.
+    if (awaitingSpecifier) {
+      const found = matchAt(code, /["']([^"']+)["']/);
+      if (found) {
+        refs.push({ specifier: found.specifier, line: index + 1, syntax: "es" });
+        awaitingSpecifier = false;
+      }
       continue;
     }
-    for (const pattern of IMPORT_PATTERNS) {
-      const match = pattern.exec(line);
-      if (match?.[1]) {
-        refs.push({ specifier: match[1], line: index + 1 });
-        break;
-      }
+
+    // A complete single-line import wins over the multi-line heuristic.
+    const found = scanLine(code, inGoBlock);
+    if (found) {
+      refs.push({ ...found, line: index + 1 });
+      continue;
     }
+
+    if (opensMultilineImport(code)) awaitingSpecifier = true;
   }
 
   return refs;
 }
 
-/**
- * Turn a relative specifier into a repo-relative path so it can be matched
- * against path globs. Non-relative specifiers (packages, Java FQNs) are
- * returned unchanged and matched as-is.
- */
-export function resolveSpecifier(specifier: string, importingFile: string): string {
-  if (!specifier.startsWith(".")) {
-    return specifier;
-  }
-
-  const segments = importingFile.split("/").slice(0, -1);
-  for (const part of specifier.split("/")) {
+function joinSegments(base: string[], parts: readonly string[]): string {
+  const segments = [...base];
+  for (const part of parts) {
     if (part === "." || part === "") continue;
     if (part === "..") {
       segments.pop();
@@ -71,4 +137,26 @@ export function resolveSpecifier(specifier: string, importingFile: string): stri
     segments.push(part);
   }
   return segments.join("/");
+}
+
+/**
+ * Turn a relative specifier into a repo-relative path so it can be matched
+ * against path globs. Non-relative specifiers (packages, Java FQNs) are
+ * returned unchanged and matched as-is.
+ */
+export function resolveSpecifier(ref: ImportRef, importingFile: string): string {
+  const directory = importingFile.split("/").slice(0, -1);
+
+  if (ref.syntax === "python-relative") {
+    // In Python one leading dot is the current package, each further dot moves
+    // up one — unlike `../`, where every segment moves up.
+    const dots = /^\.*/.exec(ref.specifier)?.[0].length ?? 0;
+    const base = directory.slice(0, directory.length - (dots - 1));
+    const remainder = ref.specifier.slice(dots).split(".").filter(Boolean);
+    return joinSegments(base, remainder);
+  }
+
+  if (!ref.specifier.startsWith(".")) return ref.specifier;
+
+  return joinSegments(directory, ref.specifier.split("/"));
 }

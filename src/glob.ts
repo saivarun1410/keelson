@@ -13,7 +13,46 @@ function escapeLiteral(text: string): string {
   return text.replace(REGEX_METACHARACTERS, "\\$&");
 }
 
-export function globToRegExp(glob: string): RegExp {
+/** Index of the `}` closing the `{` at `open`, honouring nesting. -1 if unclosed. */
+function findClosingBrace(glob: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < glob.length; index += 1) {
+    if (glob[index] === "{") depth += 1;
+    else if (glob[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/** Splits on commas at brace depth 0, so `{a,{b,c}}` yields ["a", "{b,c}"]. */
+function splitAlternatives(body: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = "";
+
+  for (const char of body) {
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+    if (char === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts;
+}
+
+/**
+ * Compiles glob syntax to a regex fragment. Brace alternatives recurse through
+ * this same function rather than being escaped as literals — otherwise `*` and
+ * `?` inside braces would reach the regex engine as raw quantifiers, silently
+ * changing what a pattern matches and making `{*.test,*.spec}` a syntax error.
+ */
+function compile(glob: string): string {
   let pattern = "";
   let index = 0;
 
@@ -45,10 +84,10 @@ export function globToRegExp(glob: string): RegExp {
     }
 
     if (char === "{") {
-      const close = glob.indexOf("}", index);
+      const close = findClosingBrace(glob, index);
       if (close !== -1) {
-        const alternatives = glob.slice(index + 1, close).split(",");
-        pattern += `(?:${alternatives.map(escapeLiteral).join("|")})`;
+        const alternatives = splitAlternatives(glob.slice(index + 1, close));
+        pattern += `(?:${alternatives.map(compile).join("|")})`;
         index = close + 1;
         continue;
       }
@@ -58,7 +97,11 @@ export function globToRegExp(glob: string): RegExp {
     index += 1;
   }
 
-  return new RegExp(`^${pattern}$`);
+  return pattern;
+}
+
+export function globToRegExp(glob: string): RegExp {
+  return new RegExp(`^${compile(glob)}$`);
 }
 
 const compiledCache = new Map<string, RegExp>();

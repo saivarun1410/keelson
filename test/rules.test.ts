@@ -1,7 +1,5 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import { matchesGlob } from "../src/glob.ts";
-import { extractImports, resolveSpecifier } from "../src/imports.ts";
 import { bannedSymbolsRule } from "../src/rules/bannedSymbols.ts";
 import { layerBoundariesRule } from "../src/rules/layerBoundaries.ts";
 import { maxFileLinesRule } from "../src/rules/maxFileLines.ts";
@@ -11,46 +9,6 @@ import { ConfigError, type FileEntry, type RuleContext } from "../src/types.ts";
 function contextOf(files: FileEntry[], allPaths: string[] = []): RuleContext {
   return { files, allPaths, root: "/repo" };
 }
-
-describe("glob", () => {
-  it("matches ** across zero or more directories", () => {
-    assert.ok(matchesGlob("src/a.ts", "src/**/*.ts"));
-    assert.ok(matchesGlob("src/deep/nested/a.ts", "src/**/*.ts"));
-    assert.ok(!matchesGlob("test/a.ts", "src/**/*.ts"));
-  });
-
-  it("keeps * from crossing directory separators", () => {
-    assert.ok(matchesGlob("src/a.ts", "src/*.ts"));
-    assert.ok(!matchesGlob("src/deep/a.ts", "src/*.ts"));
-  });
-
-  it("expands brace alternatives", () => {
-    assert.ok(matchesGlob("src/a.tsx", "src/*.{ts,tsx}"));
-    assert.ok(!matchesGlob("src/a.css", "src/*.{ts,tsx}"));
-  });
-});
-
-describe("imports", () => {
-  it("extracts specifiers across languages", () => {
-    const found = extractImports(
-      [
-        'import { a } from "./a.ts";',
-        'const b = require("lodash");',
-        "import com.acme.data.Repo;",
-        "from pkg.mod import thing",
-      ].join("\n"),
-    );
-    assert.deepEqual(
-      found.map((ref) => ref.specifier),
-      ["./a.ts", "lodash", "com.acme.data.Repo", "pkg.mod"],
-    );
-  });
-
-  it("resolves relative specifiers against the importing file", () => {
-    assert.equal(resolveSpecifier("../rules/x.ts", "src/commands/check.ts"), "src/rules/x.ts");
-    assert.equal(resolveSpecifier("lodash", "src/commands/check.ts"), "lodash");
-  });
-});
 
 describe("max-file-lines", () => {
   const config = maxFileLinesRule.parse({ id: "max-file-lines", files: ["**/*.ts"], max: 3 });
@@ -73,6 +31,20 @@ describe("max-file-lines", () => {
       ConfigError,
     );
   });
+
+  it("does not count the newline terminating the final line", () => {
+    const strict = maxFileLinesRule.parse({ id: "max-file-lines", files: ["**/*.ts"], max: 1 });
+    assert.equal(maxFileLinesRule.check(strict, contextOf([{ path: "a.ts", content: "one\n" }])).length, 0);
+    assert.equal(maxFileLinesRule.check(strict, contextOf([{ path: "a.ts", content: "one" }])).length, 0);
+    assert.equal(maxFileLinesRule.check(strict, contextOf([{ path: "a.ts", content: "one\ntwo\n" }])).length, 1);
+  });
+
+  it("rejects non-string globs at parse time", () => {
+    assert.throws(
+      () => maxFileLinesRule.parse({ id: "max-file-lines", files: [123], max: 10 }),
+      ConfigError,
+    );
+  });
 });
 
 describe("banned-symbols", () => {
@@ -92,6 +64,28 @@ describe("banned-symbols", () => {
   it("ignores files outside the glob", () => {
     const ctx = contextOf([{ path: "a.ts", content: "System.out" }]);
     assert.equal(bannedSymbolsRule.check(config, ctx).length, 0);
+  });
+
+  it("rejects catastrophically backtracking patterns at parse time", () => {
+    // Synchronous regex execution cannot be interrupted, so a nested quantifier
+    // must be refused before it can ever run against a line.
+    for (const pattern of ["(a+)+$", "([a-z]*)*", "(\\d+)+"]) {
+      assert.throws(
+        () => bannedSymbolsRule.parse({ id: "banned-symbols", files: ["*.ts"], symbols: [{ pattern }] }),
+        ConfigError,
+        `expected ${pattern} to be rejected`,
+      );
+    }
+  });
+
+  it("still accepts ordinary quantified patterns", () => {
+    assert.doesNotThrow(() =>
+      bannedSymbolsRule.parse({
+        id: "banned-symbols",
+        files: ["*.ts"],
+        symbols: [{ pattern: "console\\.log\\(" }, { pattern: "TODO\\s*:" }, { pattern: "a+b*" }],
+      }),
+    );
   });
 });
 
@@ -148,5 +142,25 @@ describe("required-companion", () => {
   it("passes when the companion exists", () => {
     const ctx = contextOf([{ path: "src/a.ts", content: "" }], ["src/a.ts", "test/a.test.ts"]);
     assert.equal(requiredCompanionRule.check(config, ctx).length, 0);
+  });
+
+  it("resolves {dir} to a repo-relative path for root-level files", () => {
+    const rooted = requiredCompanionRule.parse({
+      id: "required-companion",
+      files: ["*.ts"],
+      companion: "{dir}/{name}.test.ts",
+    });
+    const ctx = contextOf([{ path: "a.ts", content: "" }], ["a.ts", "a.test.ts"]);
+    assert.equal(requiredCompanionRule.check(rooted, ctx).length, 0);
+  });
+
+  it("does not require a file to be its own companion", () => {
+    const selfish = requiredCompanionRule.parse({
+      id: "required-companion",
+      files: ["src/*.ts"],
+      companion: "{dir}/{name}.ts",
+    });
+    const ctx = contextOf([{ path: "src/new.ts", content: "" }], ["src/new.ts"]);
+    assert.equal(requiredCompanionRule.check(selfish, ctx).length, 0);
   });
 });

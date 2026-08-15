@@ -37,12 +37,14 @@ Then wire up the hook in `.claude/settings.json`:
     "PreToolUse": [
       {
         "matcher": "Write|Edit|MultiEdit",
-        "hooks": [{ "type": "command", "command": "npx keelson hook" }]
+        "hooks": [{ "type": "command", "command": "npx keelson hook", "timeout": 10 }]
       }
     ]
   }
 }
 ```
+
+Keep the `timeout`. keelson rejects catastrophically backtracking patterns when it loads your config, but regex execution is synchronous and cannot be interrupted from inside the process, so the timeout is your outer bound if a pathological pattern ever gets through.
 
 And the same rules in CI:
 
@@ -107,8 +109,9 @@ Import extraction currently understands ES modules, CommonJS, Java/Kotlin, Pytho
 
 ## Design guarantees
 
-- **Fails open, always.** A malformed payload, a missing config, or a bug in keelson exits 0 with no decision. A tool that wedges your session when it breaks gets uninstalled. It will never block you for its own reasons — only for yours.
-- **~40ms per hook invocation**, of which ~17ms is Node's own startup. Bundled to a single minified file with one runtime dependency.
+- **Fails open, always.** A malformed payload, a missing config, an unreadable file, an edit it cannot reconstruct exactly, or a bug in keelson exits 0 with no decision. A tool that wedges your session when it breaks gets uninstalled. It will never block you for its own reasons — only for yours.
+- **~33ms per hook invocation**, of which ~17ms is Node's own startup. Bundled to a single minified file with one runtime dependency. The repo scan that `required-companion` needs is skipped entirely unless a companion rule covers the file being edited.
+- **False positives are treated as the worst class of bug.** Blocking a legitimate edit stops your work and teaches you to uninstall the tool; missing a violation only leaves you where you started. Import detection is deliberately conservative for this reason — quoted strings, commented-out code, and Go strings outside an import block are not dependencies.
 - **Same engine both sides.** `check` and `hook` run identical rule code, so the hook can't disagree with CI.
 - **keelson enforces its own `keelson.yaml` on itself**, in CI and at edit time. See the repo root.
 

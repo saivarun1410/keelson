@@ -1,20 +1,13 @@
 import { matchesAny, matchesGlob } from "../glob.ts";
 import { extractImports, resolveSpecifier } from "../imports.ts";
 import { ConfigError, type RawRule, type Rule, type Severity, type Violation } from "../types.ts";
+import { requireGlobList } from "../validate.ts";
 
 interface LayerBoundariesConfig {
   from: string[];
   disallow: string[];
   message?: string;
   severity: Severity;
-}
-
-function requireGlobList(value: unknown, field: string): string[] {
-  const list = Array.isArray(value) ? value : [value];
-  if (list.length === 0 || !list.every((entry) => typeof entry === "string" && entry.length > 0)) {
-    throw new ConfigError(`layer-boundaries requires \`${field}\` to be a glob or list of globs`);
-  }
-  return list as string[];
 }
 
 /**
@@ -32,8 +25,8 @@ export const layerBoundariesRule: Rule<LayerBoundariesConfig> = {
       throw new ConfigError("layer-boundaries `message` must be a string");
     }
     return {
-      from: requireGlobList(raw.from, "from"),
-      disallow: requireGlobList(raw.disallow, "disallow"),
+      from: requireGlobList(raw.from, "layer-boundaries `from`"),
+      disallow: requireGlobList(raw.disallow, "layer-boundaries `disallow`"),
       message,
       severity: raw.severity ?? "error",
     };
@@ -46,7 +39,7 @@ export const layerBoundariesRule: Rule<LayerBoundariesConfig> = {
       if (!matchesAny(file.path, config.from)) continue;
 
       for (const ref of extractImports(file.content)) {
-        const resolved = resolveSpecifier(ref.specifier, file.path);
+        const resolved = resolveSpecifier(ref, file.path);
         const breached = config.disallow.find(
           (glob) => matchesGlob(resolved, glob) || matchesGlob(ref.specifier, glob),
         );

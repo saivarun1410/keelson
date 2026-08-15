@@ -43,8 +43,16 @@ function suggestLineLimit(lengths: number[]): number {
 
 function renderConfig(extension: string, limit: number): string {
   const banned = BANNED_BY_EXTENSION[extension] ?? [];
+  // Patterns are regexes full of backslashes. Interpolating them into YAML
+  // quotes produced invalid escapes like "\." — so `init` wrote a config that
+  // `check` then refused to parse. JSON string syntax is a valid subset of a
+  // YAML double-quoted scalar, so this both quotes and escapes correctly.
   const symbols = banned
-    .map((entry) => `      - pattern: "${entry.pattern}"\n        message: "${entry.message}"`)
+    .map(
+      (entry) =>
+        `      - pattern: ${JSON.stringify(entry.pattern)}\n` +
+        `        message: ${JSON.stringify(entry.message)}`,
+    )
     .join("\n");
 
   return `# keelson — architecture rules enforced at agent edit time and in CI.

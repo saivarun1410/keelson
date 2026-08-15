@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { RULE_IDS, RULES } from "./rules/index.ts";
 import { ConfigError, type KeelsonConfig, type RawRule } from "./types.ts";
+import { requireGlobList } from "./validate.ts";
 
 export const CONFIG_FILENAME = "keelson.yaml";
 
@@ -76,10 +77,12 @@ export function parseConfig(source: string): KeelsonConfig {
     throw new ConfigError("`exclude` must be a list of globs");
   }
 
+  const extraExcludes = exclude === undefined ? [] : requireGlobList(exclude, "`exclude`");
+
   return {
     version,
     rules: rules.map(validateRule),
-    exclude: [...DEFAULT_EXCLUDES, ...((exclude as string[] | undefined) ?? [])],
+    exclude: [...DEFAULT_EXCLUDES, ...extraExcludes],
   };
 }
 
