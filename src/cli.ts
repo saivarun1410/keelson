@@ -12,7 +12,7 @@ Usage:
 
 Wire the hook into .claude/settings.json:
   { "hooks": { "PreToolUse": [ { "matcher": "Write|Edit|MultiEdit",
-      "hooks": [ { "type": "command", "command": "npx keelson hook" } ] } ] } }
+      "hooks": [ { "type": "command", "command": "npx @saivarun1410/keelson hook" } ] } ] } }
 `;
 
 async function main(): Promise<number> {
