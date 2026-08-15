@@ -8,5 +8,5 @@ dist/
 # README hero image if the GIF is committed. Regenerate with:
 #   cd demo && vhs hero.tape
 
-# Private launch notes — never published.
-LAUNCH-KIT.local.md
+# Private working notes — never published.
+*.local.md
