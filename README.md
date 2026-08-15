@@ -89,6 +89,22 @@ rules:
 
 Every rule takes `severity: error` (blocks, exit 1) or `severity: warn` (reports only).
 
+### `onPatternTimeout`
+
+A regex that backtracks catastrophically is abandoned rather than allowed to hang. The hook always permits the edit and warns. What `check` does is a genuine trade-off, so it is yours to set:
+
+```yaml
+version: 1
+onPatternTimeout: fail   # default; or: warn
+```
+
+| | `check` behaviour | Trade-off |
+|---|---|---|
+| `fail` (default) | exits 2, naming the skipped patterns | CI fails until you fix the pattern |
+| `warn` | exits on violations alone, prints the same diagnostic | exactly matches the hook, but a rule can stop being enforced without failing anything |
+
+Either way the violations reported are identical on both sides; only the exit code differs, and only when a pattern times out.
+
 ## Why not…
 
 | | Runs at edit time | Languages | Config |
@@ -114,7 +130,7 @@ A character-level scanner decides what counts as code first, so none of these ar
 - **Fails open, always.** A malformed payload, a missing config, an unreadable file, an edit it cannot reconstruct exactly, or a bug in keelson exits 0 with no decision. A tool that wedges your session when it breaks gets uninstalled. It will never block you for its own reasons — only for yours.
 - **A pathological regex cannot hang your session.** Regex execution is synchronous: once a catastrophically backtracking pattern starts on the main thread, nothing can interrupt it — not a `try`/`catch`, not a timer — so failing open would be impossible. Every user pattern is therefore executed in a worker under a hard deadline, and no rule ever runs one itself. Shape heuristics are not enough here: `^(a|aa)+$` is exponential with no nested quantifier anywhere in it.
 - **One slow pattern costs you only that pattern.** Each pattern is a separately interruptible job, so if one is abandoned every other rule and every other pattern still reports normally — both entry points compute the same violations either way.
-- **A pattern that hits the deadline is a config bug, not a verdict about your code.** The hook allows the edit and warns, naming the pattern; `check` reports that enforcement was incomplete and fails. That split is deliberate: a clean CI run that silently skipped a rule is worse than a failing one. Both sides use the same deadline, and patterns are warmed before timing, so the verdict depends on the pattern rather than on how many files happened to be scanned first.
+- **A pattern that hits the deadline is a config bug, not a verdict about your code.** The hook always allows the edit and warns, naming the pattern — it must never block your work over a problem in the config. What CI does is your call, via `onPatternTimeout` (below). Both sides use the same deadline, and patterns are warmed before timing, so the verdict depends on the pattern rather than on how many files happened to be scanned first.
 - **A pattern only ever runs against files its own rule covers.** Scoping happens before evaluation, so a slow pattern in one rule cannot affect files that rule never matched.
 - **~32ms per hook invocation**, of which ~17ms is Node's own startup. Answering `required-companion` costs one `stat`, not a directory walk, so latency does not grow with repository size.
 - **False positives are treated as the worst class of bug.** Blocking a legitimate edit stops your work and teaches you to uninstall the tool; missing a violation only leaves you where you started. Import detection is deliberately conservative for this reason — quoted strings, commented-out code, and Go strings outside an import block are not dependencies.

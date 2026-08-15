@@ -44,7 +44,11 @@ export async function checkCommand(argv: readonly string[]): Promise<number> {
     return hasErrors(violations) ? 1 : 0;
   }
 
-  if (violations.length > 0) process.stdout.write(`${formatReport(violations)}\n`);
+  const failing = config.onPatternTimeout === "fail";
+  // Under `warn` the run is still reported normally, so the outcome matches the
+  // hook exactly. Under `fail` a clean report would be a claim keelson cannot
+  // make, so only real violations are printed.
+  if (!failing || violations.length > 0) process.stdout.write(`${formatReport(violations)}\n`);
 
   const skipped = timeouts.reduce((total, entry) => total + entry.patterns.length, 0);
   process.stderr.write(
@@ -53,8 +57,12 @@ export async function checkCommand(argv: readonly string[]): Promise<number> {
       timeouts
         .map((entry) => `  ${entry.path}: ${entry.patterns.join(", ")}\n`)
         .join("") +
-      `Rewrite the pattern that backtracks catastrophically. CI fails here rather ` +
-      `than reporting a clean run that did not actually check everything.\n`,
+      `Rewrite the pattern that backtracks catastrophically.` +
+      (failing
+        ? ` CI fails here rather than reporting a clean run that did not actually\n` +
+          `check everything. Set \`onPatternTimeout: warn\` to match the hook instead.\n`
+        : ` \`onPatternTimeout: warn\` is set, so this does not fail the run.\n`),
   );
-  return 2;
+
+  return failing ? 2 : hasErrors(violations) ? 1 : 0;
 }
