@@ -4,19 +4,11 @@
 
 One rule file. Works at agent edit time *and* in CI. Any language.
 
-```
-$ claude "add caching to the user controller"
+![keelson blocking a controller-to-repository edit](docs/hero.gif)
 
-  ● Write(src/controller/UserController.java)
-  ⎿  Blocked by keelson:
-       • src/controller/UserController.java:12 — Controllers must go through a
-         service, not a repository. [layer-boundaries]
+The agent reads that denial, corrects itself, and moves on — in the same turn. You never see the bad commit.
 
-  ● I'll route this through UserService instead.
-  ● Write(src/service/UserService.java) ✓
-```
-
-The agent reads the denial, corrects itself, and moves on — in the same turn. You never see the bad commit.
+*(Recorded against [`demo/fixture`](demo/fixture) — reproduce it with `cd demo && vhs hero.tape`.)*
 
 ---
 
