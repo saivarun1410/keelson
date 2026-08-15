@@ -109,7 +109,7 @@ export async function initCommand(): Promise<number> {
   await writeFile(target, renderConfig(extension, limit), "utf8");
   process.stdout.write(
     `Wrote ${CONFIG_FILENAME} for .${extension} (${files.length} files, limit ${limit} lines).\n` +
-      `Next: npx keelson check\n`,
+      `Next: npx @saivarun1410/keelson check\n`,
   );
   return 0;
 }

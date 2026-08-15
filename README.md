@@ -4,6 +4,8 @@
 
 One rule file. Works at agent edit time *and* in CI. Any language.
 
+[npm package](https://www.npmjs.com/package/@saivarun1410/keelson)
+
 ![keelson blocking a controller-to-repository edit](docs/hero.gif)
 
 The agent reads that denial, corrects itself, and moves on — in the same turn. You never see the bad commit.
@@ -23,8 +25,8 @@ CI catches it eventually, but by then the agent has moved on, the context is gon
 ## Install
 
 ```bash
-npm install -D keelson
-npx keelson init          # writes a keelson.yaml inferred from your repo
+npm install -D @saivarun1410/keelson
+npx @saivarun1410/keelson init   # writes a keelson.yaml inferred from your repo
 ```
 
 `init` sets the initial line limit just above your repo's 95th-percentile file, so it passes on day one and you ratchet it down. A linter that fails 400 times on install gets deleted.
@@ -37,7 +39,7 @@ Then wire up the hook in `.claude/settings.json`:
     "PreToolUse": [
       {
         "matcher": "Write|Edit|MultiEdit",
-        "hooks": [{ "type": "command", "command": "npx keelson hook", "timeout": 10 }]
+        "hooks": [{ "type": "command", "command": "npx @saivarun1410/keelson hook", "timeout": 10 }]
       }
     ]
   }
@@ -49,7 +51,7 @@ Keep the `timeout` as a backstop. keelson bounds its own regex execution (see be
 And the same rules in CI:
 
 ```yaml
-- run: npx keelson check
+- run: npx @saivarun1410/keelson check
 ```
 
 ## Rules

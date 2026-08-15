@@ -1,5 +1,5 @@
 {
-  "name": "keelson",
+  "name": "@saivarun1410/keelson",
   "version": "0.1.0",
   "description": "Enforce your repo's architecture rules at AI-agent edit time and in CI, from one rule file, in any language.",
   "keywords": [
@@ -12,9 +12,18 @@
     "guardrails"
   ],
   "license": "MIT",
+  "author": "saivarun1410",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saivarun1410/keelson.git"
+  },
+  "bugs": {
+    "url": "https://github.com/saivarun1410/keelson/issues"
+  },
+  "homepage": "https://github.com/saivarun1410/keelson#readme",
   "type": "module",
   "bin": {
-    "keelson": "./dist/cli.js"
+    "keelson": "dist/cli.js"
   },
   "files": [
     "dist",
